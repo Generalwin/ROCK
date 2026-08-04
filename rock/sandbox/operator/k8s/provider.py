@@ -1,13 +1,17 @@
 """K8s provider implementations for managing sandbox resources."""
 
 import base64
+import copy
 import fnmatch
+import hashlib
 import json
 import os
 import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Protocol
 
+import jinja2
 import yaml
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from kubernetes import client
@@ -23,8 +27,36 @@ from rock.sandbox.operator.k8s.api_client import K8sApiClient
 from rock.sandbox.operator.k8s.constants import K8sConstants
 from rock.sandbox.operator.k8s.template_loader import K8sTemplateLoader
 from rock.sandbox.remote_sandbox import RemoteSandboxRuntime
+from rock.utils.jinja_render import render_node
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class TemplateSpec:
+    """Template creation spec, maps to API camelCase fields."""
+
+    from_image: str
+    cpu_count: int
+    memory_mb: int
+    disk_gb: int | None = None
+    num_gpus: float | None = None
+    accelerator_type: str | None = None
+    buffer_min: int | None = None
+    buffer_max: int | None = None
+    pool_min: int | None = None
+    pool_max: int | None = None
+
+
+def generate_template_id(spec: TemplateSpec) -> str:
+    """Generate template ID from (from_image, cpu_count, memory_mb) only.
+
+    Phase 1 dedup key: same (fromImage, cpuCount, memoryMB) → same templateID.
+    diskGB, numGpus, acceleratorType are placeholder fields, ignored.
+    """
+    raw = f"{spec.from_image}|{spec.cpu_count}|{spec.memory_mb}"
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return f"{K8sConstants.TEMPLATE_ID_PREFIX}{digest}"
 
 
 class PoolSelector(ABC):
@@ -274,9 +306,14 @@ class BatchSandboxProvider(K8sProvider):
         self._k8s_config = k8s_config
         self._api_client = None
         self._k8s_api: K8sApiClient | None = None
+        self._pool_api: K8sApiClient | None = None
         self._initialized = False
         self._nacos_provider = None
         self._image_auth_key = self._load_image_auth_key(k8s_config)
+
+        # Pool template for Template API (Warm path)
+        self._pool_template = k8s_config.pool_template
+        self._jinja_env = jinja2.Environment()
 
         # Initialize template loader with config templates
         self._template_loader = K8sTemplateLoader(
@@ -522,6 +559,19 @@ class BatchSandboxProvider(K8sProvider):
                 resync_period=self._k8s_config.resync_period,
             )
             await self._k8s_api.start()
+
+            # Pool CRD informer for Template API (Warm path)
+            self._pool_api = K8sApiClient(
+                api_client=self._api_client,
+                group=K8sConstants.CRD_GROUP,
+                version=K8sConstants.CRD_VERSION,
+                plural=K8sConstants.CRD_PLURAL_POOL,
+                namespace=self.namespace,
+                qps=self._k8s_config.api_qps,
+                resync_period=self._k8s_config.resync_period,
+            )
+            await self._pool_api.start()
+
             self._initialized = True
 
             logger.info("Initialized K8s provider with informer")
@@ -865,3 +915,203 @@ class BatchSandboxProvider(K8sProvider):
             port=proxy_port,
         )
         return RemoteSandboxRuntime.from_config(runtime_config)
+
+    # ========================================================================
+    # Template API (Warm path) — create / get / delete Pool CRD
+    # ========================================================================
+
+    async def create_template(self, spec: TemplateSpec) -> dict:
+        """Create or reuse a template (Pool CRD).
+
+        Idempotent: same (fromImage, cpuCount, memoryMB) produces the same templateID.
+        Returns a dict with template_id and status.
+        """
+        await self._ensure_initialized()
+        template_id = generate_template_id(spec)
+
+        # Check if already exists
+        existing = await self._get_pool(template_id)
+        if existing is not None:
+            logger.info(f"Template {template_id} already exists, reusing")
+            return self._map_pool_to_template_status(existing)
+
+        # Create new Pool CRD
+        await self._create_pool(template_id, spec)
+        # Return waiting status (just submitted, controller hasn't started)
+        return {
+            "template_id": template_id,
+            "status": "waiting",
+            "reason": None,
+            "created_at": "",
+            "updated_at": "",
+        }
+
+    async def get_template_status(self, template_id: str) -> dict | None:
+        """Get template (Pool) status.
+
+        Args:
+            template_id: Template identifier (= Pool name)
+
+        Returns:
+            Status dict or None if not found
+        """
+        await self._ensure_initialized()
+        pool = await self._get_pool(template_id)
+        if pool is None:
+            return None
+        return self._map_pool_to_template_status(pool)
+
+    async def delete_template(self, template_id: str) -> bool:
+        """Delete template (Pool CRD).
+
+        Args:
+            template_id: Template identifier (= Pool name)
+
+        Returns:
+            True if deleted or not found, False if in use
+        """
+        await self._ensure_initialized()
+
+        # Check if pool exists
+        pool = await self._get_pool(template_id)
+        if pool is None:
+            logger.info(f"Template {template_id} not found, already deleted")
+            return True
+
+        # Check if in use
+        if await self._is_pool_in_use(template_id):
+            logger.warning(f"Template {template_id} is in use, cannot delete")
+            return False
+
+        await self._delete_pool(template_id)
+        return True
+
+    async def _create_pool(self, pool_name: str, spec: TemplateSpec) -> None:
+        """Create Pool CRD from template."""
+        manifest = self._build_pool_manifest_from_template(pool_name, spec)
+        await self._pool_api.create_custom_object(body=manifest)
+        logger.info(f"Created Pool {pool_name} for template")
+
+    async def _get_pool(self, pool_name: str) -> dict | None:
+        """Get Pool CRD from cache.
+
+        Returns None if not found.
+        """
+        try:
+            return await self._pool_api.get_custom_object(name=pool_name)
+        except Exception as e:
+            if hasattr(e, "status") and e.status == 404:
+                return None
+            raise
+
+    async def _delete_pool(self, pool_name: str) -> None:
+        """Delete Pool CRD."""
+        await self._pool_api.delete_custom_object(name=pool_name)
+        logger.info(f"Deleted Pool {pool_name}")
+
+    async def _is_pool_in_use(self, pool_name: str) -> bool:
+        """Check if any BatchSandbox references this pool."""
+        sandboxes = await self._k8s_api.list_custom_objects()
+        for sb in sandboxes:
+            pool_ref = sb.get("spec", {}).get("poolRef")
+            if pool_ref == pool_name:
+                return True
+        return False
+
+    def _build_pool_manifest_from_template(self, pool_name: str, spec: TemplateSpec) -> dict[str, Any]:
+        """Build Pool CRD manifest from config template and spec.
+
+        Renders Jinja2 variables in the pool_template config:
+        from_image, cpu_count, memory_mb, disk_gb, num_gpus, accelerator_type,
+        buffer_min, buffer_max, pool_min, pool_max
+        """
+        template = copy.deepcopy(self._pool_template)
+
+        ctx: dict[str, Any] = {
+            "from_image": spec.from_image,
+            "cpu_count": spec.cpu_count,
+            "memory_mb": spec.memory_mb,
+        }
+        if spec.disk_gb is not None:
+            ctx["disk_gb"] = spec.disk_gb
+        if spec.num_gpus is not None:
+            ctx["num_gpus"] = spec.num_gpus
+        if spec.accelerator_type is not None:
+            ctx["accelerator_type"] = spec.accelerator_type
+        if spec.buffer_min is not None:
+            ctx["buffer_min"] = spec.buffer_min
+        if spec.buffer_max is not None:
+            ctx["buffer_max"] = spec.buffer_max
+        if spec.pool_min is not None:
+            ctx["pool_min"] = spec.pool_min
+        if spec.pool_max is not None:
+            ctx["pool_max"] = spec.pool_max
+
+        rendered = render_node(template, self._jinja_env, ctx)
+
+        # Ensure capacitySpec values are integers (Jinja2 renders them as strings)
+        cap = rendered.get("capacitySpec", {})
+        if cap:
+            for k in ("bufferMin", "bufferMax", "poolMin", "poolMax"):
+                if k in cap:
+                    cap[k] = int(cap[k])
+
+        manifest = {
+            "apiVersion": K8sConstants.CRD_API_VERSION,
+            "kind": K8sConstants.CRD_KIND_POOL,
+            "metadata": {
+                "name": pool_name,
+                "namespace": self.namespace,
+                "labels": {
+                    K8sConstants.LABEL_MANAGED_BY: K8sConstants.LABEL_MANAGED_BY_TEMPLATE_API,
+                },
+            },
+            "spec": rendered,
+        }
+        return manifest
+
+    def _map_pool_to_template_status(self, pool: dict) -> dict:
+        """Map Pool CRD to template status dict (design doc format)."""
+        pool_name = pool.get("metadata", {}).get("name", "")
+        status = pool.get("status", {})
+        metadata = pool.get("metadata", {})
+
+        ready_replicas = status.get("available", 0)
+        total_replicas = status.get("total", 0)
+
+        # Determine template status
+        if ready_replicas > 0:
+            template_status = "ready"
+        elif total_replicas > 0:
+            template_status = "building"
+        else:
+            template_status = "building"
+
+        # Check for error conditions
+        conditions = status.get("conditions", [])
+        error_message = None
+        for cond in conditions:
+            if cond.get("type") == "Ready" and cond.get("status") == "False":
+                template_status = "error"
+                error_message = cond.get("message", "pool creation failed")
+                break
+
+        # Build reason if error
+        reason = None
+        if template_status == "error":
+            reason = {
+                "message": error_message or "pool creation failed",
+                "step": "create_fiber_pool",
+                "logEntries": [],
+            }
+
+        created_at = metadata.get("creationTimestamp", "")
+        updated_at = status.get("updatedTime", created_at)
+
+        return {
+            "template_id": pool_name,
+            "status": template_status,
+            "reason": reason,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }

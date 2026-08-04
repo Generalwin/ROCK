@@ -26,6 +26,7 @@ from rock.admin.core.scheduler_task_table import SchedulerTaskTable
 from rock.admin.entrypoints.admin_ops_api import admin_ops_router, set_ops_service
 from rock.admin.entrypoints.sandbox_api import sandbox_router, set_sandbox_manager
 from rock.admin.entrypoints.sandbox_proxy_api import sandbox_proxy_router, set_sandbox_proxy_service
+from rock.admin.entrypoints.template_api import template_router
 from rock.admin.entrypoints.warmup_api import set_warmup_service, warmup_router
 from rock.admin.gem.api import gem_router, set_env_service
 from rock.admin.metrics.monitor import MetricsMonitor
@@ -343,6 +344,7 @@ async def log_requests_and_responses(request: Request, call_next):
 def _include_routers(app: FastAPI, role: str) -> None:
     if role == "admin":
         app.include_router(sandbox_router, prefix="/apis/envs/sandbox/v1", tags=["sandbox"])
+        app.include_router(template_router, prefix="/apis/envs/sandbox/v1", tags=["template"])
         app.include_router(admin_ops_router, prefix="/apis/envs/sandbox/v1/ops", tags=["admin-ops"])
     else:
         app.include_router(sandbox_proxy_router, prefix="/apis/envs/sandbox/v1", tags=["sandbox"])

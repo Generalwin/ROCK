@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from rock.actions import SandboxResponse
 from rock.actions.sandbox.response import State, StateTransitionRecord
@@ -102,6 +102,21 @@ class SandboxListResponse(SandboxResponse):
     items: list[SandboxListStatusResponse] = []
     total: int = 0
     has_more: bool = False
+
+
+class TemplateCreateResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    template_id: str = Field(alias="templateID")
+    status: str
+
+
+class TemplateStatusResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    template_id: str = Field(alias="templateID")
+    status: str
+    reason: dict | None = None
+    created_at: str = Field(default="", alias="createdAt")
+    updated_at: str = Field(default="", alias="updatedAt")
 
 
 class TaskSetMetadata(BaseModel):

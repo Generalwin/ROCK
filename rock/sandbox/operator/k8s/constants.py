@@ -31,3 +31,14 @@ class K8sConstants:
     # Nacos config keys
     NACOS_POOLS_KEY = "pools"
     NACOS_TEMPLATE_RULES_KEY = "template_rules"
+
+    # Pool CRD (Warm path: Template API creates Pool CRD)
+    CRD_PLURAL_POOL = "pools"
+    CRD_KIND_POOL = "Pool"
+
+    # Label: distinguish Template API created Pools from system-configured Pools
+    LABEL_MANAGED_BY = "rock.sandbox/managed-by"
+    LABEL_MANAGED_BY_TEMPLATE_API = "template-api"
+
+    # templateID prefix
+    TEMPLATE_ID_PREFIX = "tpl-"

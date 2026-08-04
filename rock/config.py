@@ -389,6 +389,10 @@ class K8sConfig:
     # ROCK_IMAGE_AUTH_KEY environment variable if not set here.
     image_auth_key: str | None = None
 
+    # Pool rendering template for Template API (Warm path).
+    # Rendered via Jinja2 to produce Pool CRD spec.
+    pool_template: dict | None = None
+
     # ============================================================================
     # DEPRECATED: The following fields are deprecated and will be removed in a
     # future version. Do NOT use them in new code.

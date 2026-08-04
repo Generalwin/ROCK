@@ -87,6 +87,38 @@ class SandboxManager(BaseManager):
         self._proxy_service = create_sandbox_proxy_service(rock_config=rock_config, meta_store=meta_store)
         logger.info("sandbox service init success")
 
+    # ========================================================================
+    # Template API (Warm path) — delegate to operator
+    # ========================================================================
+
+    async def create_template(self, spec) -> dict:
+        """Create or reuse a template (Pool CRD).
+
+        Delegates to operator. Non-K8s operators raise BadRequestRockError.
+        """
+        if self._operator is None:
+            raise BadRequestRockError("No operator configured")
+        return await self._operator.create_template(spec)
+
+    async def get_template_status(self, template_id: str) -> dict | None:
+        """Get template (Pool) status.
+
+        Delegates to operator. Non-K8s operators raise BadRequestRockError.
+        """
+        if self._operator is None:
+            raise BadRequestRockError("No operator configured")
+        return await self._operator.get_template_status(template_id)
+
+    async def delete_template(self, template_id: str) -> bool:
+        """Delete template (Pool CRD).
+
+        Returns True if deleted or not found, False if in use.
+        Delegates to operator. Non-K8s operators raise BadRequestRockError.
+        """
+        if self._operator is None:
+            raise BadRequestRockError("No operator configured")
+        return await self._operator.delete_template(template_id)
+
     def _init_archive_storage(self, rock_config: RockConfig) -> None:
         archive_cfg = rock_config.lifecycle.archive
         image_registry_cfg = archive_cfg.registry
