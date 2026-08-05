@@ -1,5 +1,7 @@
 """K8s Operator implementation for managing sandboxes via Kubernetes."""
 
+from typing import Any
+
 from rock.actions.sandbox.sandbox_info import SandboxInfo
 from rock.common.constants import StopReason
 from rock.config import K8sConfig
@@ -175,3 +177,15 @@ class K8sOperator(AbstractOperator):
             True if deleted or not found, False if in use
         """
         return await self._provider.delete_template(template_id)
+
+    async def scale_template(self, template_id: str, capacity: dict[str, Any]) -> dict:
+        """Scale a template's Pool capacity.
+
+        Args:
+            template_id: Template identifier (= Pool name).
+            capacity: Snake-case capacity fields to update.
+
+        Returns:
+            Updated template status dict.
+        """
+        return await self._provider.scale_template(template_id, capacity)

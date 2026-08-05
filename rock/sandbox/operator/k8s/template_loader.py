@@ -193,9 +193,6 @@ class K8sTemplateLoader:
         are intentionally excluded from ``spec``; they are supplied by the pool
         template defaults and can be adjusted later via the Scale API.
 
-        After rendering, ``capacitySpec`` integer fields are converted from
-        strings back to ints (Jinja2 renders numbers as strings).
-
         Args:
             pool_name: Name for the Pool CRD (also the template ID).
             spec: Template creation spec with the attributes listed above.
@@ -224,13 +221,6 @@ class K8sTemplateLoader:
             ctx["accelerator_type"] = spec.accelerator_type
 
         rendered = render_node(template, self._jinja_env, ctx)
-
-        # Ensure capacitySpec values are integers (Jinja2 renders them as strings)
-        cap = rendered.get("capacitySpec", {})
-        if cap:
-            for k in ("bufferMin", "bufferMax", "poolMin", "poolMax"):
-                if k in cap:
-                    cap[k] = int(cap[k])
 
         return {
             "apiVersion": K8sConstants.CRD_API_VERSION,

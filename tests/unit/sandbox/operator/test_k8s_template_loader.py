@@ -385,10 +385,10 @@ class TestBuildPoolManifest:
 
     POOL_TEMPLATE = {
         "capacitySpec": {
-            "bufferMin": "{{ buffer_min | default(1) }}",
-            "bufferMax": "{{ buffer_max | default(3) }}",
-            "poolMin": "{{ pool_min | default(1) }}",
-            "poolMax": "{{ pool_max | default(10) }}",
+            "bufferMin": 1,
+            "bufferMax": 3,
+            "poolMin": 1,
+            "poolMax": 10,
         },
         "template": {
             "metadata": {"labels": {"app": "rock-pool"}},
@@ -457,7 +457,7 @@ class TestBuildPoolManifest:
         assert container["resources"]["limits"]["memory"] == "4096Mi"
 
     def test_build_pool_manifest_capacity_defaults(self, pool_loader):
-        """Capacity uses defaults and is converted to integers."""
+        """Capacity uses defaults from the pool template."""
         spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
         manifest = pool_loader.build_pool_manifest("tpl-abc123", spec)
 
