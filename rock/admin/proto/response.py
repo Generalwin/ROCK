@@ -110,6 +110,27 @@ class TemplateCreateResponse(BaseModel):
     status: str
 
 
+class TemplateCapacitySpec(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    pool_min: int | None = Field(default=None, alias="poolMin")
+    pool_max: int | None = Field(default=None, alias="poolMax")
+    buffer_min: int | None = Field(default=None, alias="bufferMin")
+    buffer_max: int | None = Field(default=None, alias="bufferMax")
+
+
+class TemplateCapacityStatus(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    available: int | None = None
+    total: int | None = None
+    allocated: int | None = None
+
+
+class TemplateCapacityResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    spec: TemplateCapacitySpec
+    status: TemplateCapacityStatus
+
+
 class TemplateStatusResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     template_id: str = Field(alias="templateID")
@@ -117,6 +138,7 @@ class TemplateStatusResponse(BaseModel):
     reason: dict | None = None
     created_at: str = Field(default="", alias="createdAt")
     updated_at: str = Field(default="", alias="updatedAt")
+    capacity: TemplateCapacityResponse
 
 
 class TaskSetMetadata(BaseModel):

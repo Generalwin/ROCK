@@ -1,4 +1,4 @@
-"""K8S template loader for BatchSandbox manifests."""
+"""K8S template loader for BatchSandbox and Pool manifests."""
 
 import copy
 import json
@@ -14,17 +14,24 @@ logger = init_logger(__name__)
 
 
 class K8sTemplateLoader:
-    """Loader for K8S BatchSandbox templates."""
+    """Loader for K8S BatchSandbox and Pool CRD manifests."""
 
-    def __init__(self, templates: dict[str, dict[str, Any]], default_namespace: str = "rock"):
+    def __init__(
+        self,
+        templates: dict[str, dict[str, Any]],
+        default_namespace: str = "rock",
+        pool_template: dict[str, Any] | None = None,
+    ):
         """Initialize template loader.
 
         Args:
-            templates: Dictionary of template configurations from K8sConfig
+            templates: Dictionary of BatchSandbox template configurations from K8sConfig
             default_namespace: Default namespace if template doesn't specify one
+            pool_template: Optional Pool CRD template for Template API (Warm path)
         """
         self._templates: dict[str, dict[str, Any]] = templates
         self._default_namespace = default_namespace
+        self._pool_template = pool_template
 
         if not self._templates:
             raise ValueError("No templates provided. At least one template must be defined in K8sConfig.templates.")
@@ -176,6 +183,67 @@ class K8sTemplateLoader:
         manifest["spec"]["template"]["metadata"]["labels"][K8sConstants.LABEL_SANDBOX_ID] = sandbox_id
 
         return manifest
+
+    def build_pool_manifest(self, pool_name: str, spec: Any) -> dict[str, Any]:
+        """Build a complete Pool CRD manifest from the pool template and spec.
+
+        The pool template is rendered with Jinja2 against a context built from
+        ``spec``: from_image, cpu_count, memory_mb, disk_gb, num_gpus,
+        accelerator_type. Capacity fields (poolMin/poolMax/bufferMin/bufferMax)
+        are intentionally excluded from ``spec``; they are supplied by the pool
+        template defaults and can be adjusted later via the Scale API.
+
+        After rendering, ``capacitySpec`` integer fields are converted from
+        strings back to ints (Jinja2 renders numbers as strings).
+
+        Args:
+            pool_name: Name for the Pool CRD (also the template ID).
+            spec: Template creation spec with the attributes listed above.
+
+        Returns:
+            Complete Pool CRD manifest.
+
+        Raises:
+            ValueError: If no pool template was configured.
+        """
+        if not self._pool_template:
+            raise ValueError("No pool template configured. Set k8s.pool_template in config.")
+
+        template = copy.deepcopy(self._pool_template)
+
+        ctx: dict[str, Any] = {
+            "from_image": spec.from_image,
+            "cpu_count": spec.cpu_count,
+            "memory_mb": spec.memory_mb,
+        }
+        if spec.disk_gb is not None:
+            ctx["disk_gb"] = spec.disk_gb
+        if spec.num_gpus is not None:
+            ctx["num_gpus"] = spec.num_gpus
+        if spec.accelerator_type is not None:
+            ctx["accelerator_type"] = spec.accelerator_type
+
+        rendered = render_node(template, self._jinja_env, ctx)
+
+        # Ensure capacitySpec values are integers (Jinja2 renders them as strings)
+        cap = rendered.get("capacitySpec", {})
+        if cap:
+            for k in ("bufferMin", "bufferMax", "poolMin", "poolMax"):
+                if k in cap:
+                    cap[k] = int(cap[k])
+
+        return {
+            "apiVersion": K8sConstants.CRD_API_VERSION,
+            "kind": K8sConstants.CRD_KIND_POOL,
+            "metadata": {
+                "name": pool_name,
+                "namespace": self._default_namespace,
+                "labels": {
+                    K8sConstants.LABEL_MANAGED_BY: K8sConstants.LABEL_MANAGED_BY_TEMPLATE_API,
+                },
+            },
+            "spec": rendered,
+        }
 
     @property
     def available_templates(self) -> list[str]:

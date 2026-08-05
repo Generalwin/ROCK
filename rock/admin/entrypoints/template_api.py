@@ -11,7 +11,7 @@ from fastapi import APIRouter
 
 from rock.actions import RockResponse
 from rock.admin.entrypoints import sandbox_api
-from rock.admin.proto.request import TemplateCreateRequest
+from rock.admin.proto.request import TemplateCreateRequest, TemplateScaleRequest
 from rock.admin.proto.response import TemplateCreateResponse, TemplateStatusResponse
 from rock.common.exception import handle_exceptions
 from rock.common.validation import NonBlankStr
@@ -29,8 +29,9 @@ template_router = APIRouter()
 async def create_template(request: TemplateCreateRequest) -> RockResponse[TemplateCreateResponse]:
     """Create or reuse a template.
 
-    Idempotent: same (fromImage, cpuCount, memoryMB) produces the same templateID.
-    Returns templateID and status ('waiting' for new, current status if exists).
+    Idempotent: same non-null spec fields produce the same templateID.
+    Capacity is excluded from identity; use /templates/{id}/scale to adjust it.
+    Returns templateID and status.
     """
     spec = TemplateSpec(
         from_image=request.from_image,
@@ -57,14 +58,28 @@ async def get_template_status(template_id: NonBlankStr) -> RockResponse[Template
     return RockResponse(result=TemplateStatusResponse(**status))
 
 
+@template_router.post("/templates/{template_id}/scale")
+@handle_exceptions(error_message="scale template failed")
+async def scale_template(
+    template_id: NonBlankStr,
+    request: TemplateScaleRequest,
+) -> RockResponse[TemplateStatusResponse]:
+    """Scale a template's Pool capacity.
+
+    PATCH semantics: only provided capacity fields are updated.
+    """
+    capacity = request.model_dump(exclude_unset=True, by_alias=False)
+    result = await sandbox_api.sandbox_manager.scale_template(template_id, capacity)
+    return RockResponse(result=TemplateStatusResponse(**result))
+
+
 @template_router.delete("/templates/{template_id}")
 @handle_exceptions(error_message="delete template failed")
 async def delete_template(template_id: NonBlankStr) -> RockResponse[str]:
     """Delete a template (Pool CRD).
 
-    Returns failure message if the template is in use.
+    Returns success when deleted or not found. K8s/Pool controller is responsible
+    for protecting a pool that is still referenced by running sandboxes.
     """
-    deleted = await sandbox_api.sandbox_manager.delete_template(template_id)
-    if not deleted:
-        return RockResponse(result=f"{template_id} delete failed")
+    await sandbox_api.sandbox_manager.delete_template(template_id)
     return RockResponse(result=f"{template_id} deleted")

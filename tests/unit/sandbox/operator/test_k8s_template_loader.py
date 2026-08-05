@@ -3,6 +3,7 @@
 import pytest
 
 from rock.sandbox.operator.k8s.constants import K8sConstants
+from rock.sandbox.operator.k8s.provider import TemplateSpec
 from rock.sandbox.operator.k8s.template_loader import K8sTemplateLoader
 
 
@@ -377,3 +378,102 @@ class TestK8sTemplateLoader:
 
         annotations = manifest["spec"]["template"]["metadata"]["annotations"]
         assert annotations["example.com/image-auth"] == "dGVzdC1lbmNyeXB0ZWQ="
+
+
+class TestBuildPoolManifest:
+    """Tests for Pool CRD manifest building via K8sTemplateLoader."""
+
+    POOL_TEMPLATE = {
+        "capacitySpec": {
+            "bufferMin": "{{ buffer_min | default(1) }}",
+            "bufferMax": "{{ buffer_max | default(3) }}",
+            "poolMin": "{{ pool_min | default(1) }}",
+            "poolMax": "{{ pool_max | default(10) }}",
+        },
+        "template": {
+            "metadata": {"labels": {"app": "rock-pool"}},
+            "spec": {
+                "tolerations": [{"operator": "Exists"}],
+                "containers": [{
+                    "name": "main",
+                    "image": "{{ from_image }}",
+                    "resources": {
+                        "limits": {
+                            "cpu": "{{ cpu_count }}",
+                            "memory": "{{ memory_mb }}Mi",
+                        },
+                        "requests": {
+                            "cpu": "{{ cpu_count }}",
+                            "memory": "{{ memory_mb }}Mi",
+                        },
+                    },
+                }],
+            },
+        },
+    }
+
+    @pytest.fixture
+    def pool_loader(self):
+        """Create a loader with a pool template."""
+        return K8sTemplateLoader(
+            templates={"default": {"ports": {"proxy": 8000}, "template": {"spec": {}}}},
+            default_namespace="rock-test",
+            pool_template=self.POOL_TEMPLATE,
+        )
+
+    def test_build_pool_manifest_basic(self, pool_loader):
+        """Pool CRD wrapper is assembled correctly."""
+        spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
+        manifest = pool_loader.build_pool_manifest("tpl-abc123", spec)
+
+        assert manifest["apiVersion"] == K8sConstants.CRD_API_VERSION
+        assert manifest["kind"] == K8sConstants.CRD_KIND_POOL
+        assert manifest["metadata"]["name"] == "tpl-abc123"
+        assert manifest["metadata"]["namespace"] == "rock-test"
+        assert manifest["metadata"]["labels"][K8sConstants.LABEL_MANAGED_BY] == K8sConstants.LABEL_MANAGED_BY_TEMPLATE_API
+
+    def test_build_pool_manifest_renders_image(self, pool_loader):
+        """Jinja2 renders from_image variable."""
+        spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
+        manifest = pool_loader.build_pool_manifest("tpl-abc123", spec)
+
+        container = manifest["spec"]["template"]["spec"]["containers"][0]
+        assert container["image"] == "python:3.11"
+
+    def test_build_pool_manifest_renders_cpu(self, pool_loader):
+        """Jinja2 renders cpu_count variable."""
+        spec = TemplateSpec(from_image="python:3.11", cpu_count=4, memory_mb=2048)
+        manifest = pool_loader.build_pool_manifest("tpl-abc123", spec)
+
+        container = manifest["spec"]["template"]["spec"]["containers"][0]
+        assert container["resources"]["limits"]["cpu"] == "4"
+
+    def test_build_pool_manifest_renders_memory(self, pool_loader):
+        """Jinja2 renders memory_mb variable."""
+        spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=4096)
+        manifest = pool_loader.build_pool_manifest("tpl-abc123", spec)
+
+        container = manifest["spec"]["template"]["spec"]["containers"][0]
+        assert container["resources"]["limits"]["memory"] == "4096Mi"
+
+    def test_build_pool_manifest_capacity_defaults(self, pool_loader):
+        """Capacity uses defaults and is converted to integers."""
+        spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
+        manifest = pool_loader.build_pool_manifest("tpl-abc123", spec)
+
+        cap = manifest["spec"]["capacitySpec"]
+        assert cap["bufferMin"] == 1
+        assert cap["bufferMax"] == 3
+        assert cap["poolMin"] == 1
+        assert cap["poolMax"] == 10
+
+    def test_build_pool_manifest_without_pool_template(self):
+        """Calling build_pool_manifest without a pool template raises ValueError."""
+        loader = K8sTemplateLoader(
+            templates={"default": {"ports": {"proxy": 8000}, "template": {"spec": {}}}},
+            default_namespace="rock-test",
+        )
+        spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
+
+        with pytest.raises(ValueError, match="No pool template configured"):
+            loader.build_pool_manifest("tpl-abc123", spec)

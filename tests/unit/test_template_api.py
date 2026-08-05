@@ -1,12 +1,10 @@
 """Unit tests for Template API (Warm path) implementation."""
-import copy
-
-import jinja2
 import pytest
 
+from rock.admin.proto.request import TemplateScaleRequest
 from rock.sandbox.operator.k8s.constants import K8sConstants
 from rock.sandbox.operator.k8s.provider import BatchSandboxProvider, TemplateSpec, generate_template_id
-from rock.utils.jinja_render import render_node
+from rock.sdk.common.exceptions import BadRequestRockError
 
 
 class TestGenerateTemplateId:
@@ -36,14 +34,21 @@ class TestGenerateTemplateId:
         spec2 = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=4096)
         assert generate_template_id(spec1) != generate_template_id(spec2)
 
-    def test_placeholder_fields_ignored(self):
-        """Phase 1: diskGB, numGpus, acceleratorType don't affect template ID."""
-        spec1 = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
-        spec2 = TemplateSpec(
-            from_image="python:3.11", cpu_count=2, memory_mb=2048,
-            disk_gb=40, num_gpus=2, accelerator_type="A100",
+    def test_optional_fields_affect_id(self):
+        """All non-null optional fields participate in template ID."""
+        base = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
+        with_disk = TemplateSpec(
+            from_image="python:3.11", cpu_count=2, memory_mb=2048, disk_gb=40,
         )
-        assert generate_template_id(spec1) == generate_template_id(spec2)
+        with_gpu = TemplateSpec(
+            from_image="python:3.11", cpu_count=2, memory_mb=2048, num_gpus=2,
+        )
+        with_accelerator = TemplateSpec(
+            from_image="python:3.11", cpu_count=2, memory_mb=2048, accelerator_type="A100",
+        )
+        assert generate_template_id(base) != generate_template_id(with_disk)
+        assert generate_template_id(base) != generate_template_id(with_gpu)
+        assert generate_template_id(base) != generate_template_id(with_accelerator)
 
     def test_id_has_prefix(self):
         """Template ID starts with the configured prefix."""
@@ -69,85 +74,15 @@ class TestTemplateSpec:
         assert spec.num_gpus is None
         assert spec.accelerator_type is None
 
-
-class TestBuildPoolManifest:
-    """Tests for Pool CRD manifest building (Jinja2 rendering)."""
-
-    POOL_TEMPLATE = {
-        "capacitySpec": {
-            "bufferMin": "{{ buffer_min | default(1) }}",
-            "bufferMax": "{{ buffer_max | default(3) }}",
-            "poolMin": "{{ pool_min | default(1) }}",
-            "poolMax": "{{ pool_max | default(10) }}",
-        },
-        "template": {
-            "metadata": {"labels": {"app": "rock-pool"}},
-            "spec": {
-                "tolerations": [{"operator": "Exists"}],
-                "containers": [{
-                    "name": "main",
-                    "image": "{{ from_image }}",
-                    "resources": {
-                        "limits": {
-                            "cpu": "{{ cpu_count }}",
-                            "memory": "{{ memory_mb }}Mi",
-                        },
-                        "requests": {
-                            "cpu": "{{ cpu_count }}",
-                            "memory": "{{ memory_mb }}Mi",
-                        },
-                    },
-                }],
-            },
-        },
-    }
-
-    def test_jinja_render_image(self):
-        """Jinja2 renders from_image variable."""
-        spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
-        ctx = {
-            "from_image": spec.from_image,
-            "cpu_count": spec.cpu_count,
-            "memory_mb": spec.memory_mb,
-        }
-        rendered = render_node(copy.deepcopy(self.POOL_TEMPLATE), jinja2.Environment(), ctx)
-        assert rendered["template"]["spec"]["containers"][0]["image"] == "python:3.11"
-
-    def test_jinja_render_cpu(self):
-        """Jinja2 renders cpu_count variable."""
-        spec = TemplateSpec(from_image="python:3.11", cpu_count=4, memory_mb=2048)
-        ctx = {
-            "from_image": spec.from_image,
-            "cpu_count": spec.cpu_count,
-            "memory_mb": spec.memory_mb,
-        }
-        rendered = render_node(copy.deepcopy(self.POOL_TEMPLATE), jinja2.Environment(), ctx)
-        assert rendered["template"]["spec"]["containers"][0]["resources"]["limits"]["cpu"] == "4"
-
-    def test_jinja_render_memory(self):
-        """Jinja2 renders memory_mb variable."""
-        spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=4096)
-        ctx = {
-            "from_image": spec.from_image,
-            "cpu_count": spec.cpu_count,
-            "memory_mb": spec.memory_mb,
-        }
-        rendered = render_node(copy.deepcopy(self.POOL_TEMPLATE), jinja2.Environment(), ctx)
-        assert rendered["template"]["spec"]["containers"][0]["resources"]["limits"]["memory"] == "4096Mi"
-
-    def test_jinja_render_capacity_default(self):
-        """Capacity uses defaults when not specified."""
-        spec = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048)
-        ctx = {
-            "from_image": spec.from_image,
-            "cpu_count": spec.cpu_count,
-            "memory_mb": spec.memory_mb,
-        }
-        rendered = render_node(copy.deepcopy(self.POOL_TEMPLATE), jinja2.Environment(), ctx)
-        assert rendered["capacitySpec"]["bufferMin"] == "1"
-        assert rendered["capacitySpec"]["bufferMax"] == "3"
-        assert rendered["capacitySpec"]["poolMin"] == "1"
-        assert rendered["capacitySpec"]["poolMax"] == "10"
+    def test_capacity_fields_removed(self):
+        """Capacity fields are excluded from TemplateSpec identity."""
+        with pytest.raises(TypeError):
+            TemplateSpec(
+                from_image="python:3.11",
+                cpu_count=2,
+                memory_mb=2048,
+                buffer_min=1,
+            )
 
 
 def _make_provider():
@@ -163,50 +98,192 @@ class TestMapPoolToTemplateStatus:
         provider = _make_provider()
         mock_pool = {
             "metadata": {"name": "tpl-abc123", "creationTimestamp": "2026-08-03T06:00:00Z"},
-            "status": {"available": 2, "total": 3},
+            "spec": {
+                "capacitySpec": {"poolMin": 1, "poolMax": 10, "bufferMin": 1, "bufferMax": 3},
+            },
+            "status": {"available": 2, "total": 3, "allocated": 1},
         }
         result = provider._map_pool_to_template_status(mock_pool)
         assert result["template_id"] == "tpl-abc123"
         assert result["status"] == "ready"
         assert result["reason"] is None
         assert result["created_at"] == "2026-08-03T06:00:00Z"
+        assert result["capacity"]["spec"]["pool_min"] == 1
+        assert result["capacity"]["status"]["available"] == 2
 
     def test_building_pool(self):
         """Pool with total but no available maps to 'building'."""
         provider = _make_provider()
         mock_pool = {
             "metadata": {"name": "tpl-abc123", "creationTimestamp": "2026-08-03T06:00:00Z"},
-            "status": {"available": 0, "total": 3},
+            "spec": {
+                "capacitySpec": {"poolMin": 1, "poolMax": 10, "bufferMin": 1, "bufferMax": 3},
+            },
+            "status": {"available": 0, "total": 3, "allocated": 0},
         }
         result = provider._map_pool_to_template_status(mock_pool)
         assert result["status"] == "building"
+        assert result["capacity"]["spec"]["pool_max"] == 10
+        assert result["capacity"]["status"]["total"] == 3
 
     def test_new_pool_no_status(self):
         """Pool with no status section maps to 'building'."""
         provider = _make_provider()
         mock_pool = {
             "metadata": {"name": "tpl-abc123", "creationTimestamp": "2026-08-03T06:00:00Z"},
+            "spec": {
+                "capacitySpec": {"poolMin": 1, "poolMax": 10, "bufferMin": 1, "bufferMax": 3},
+            },
         }
         result = provider._map_pool_to_template_status(mock_pool)
         assert result["status"] == "building"
         assert result["reason"] is None
+        assert result["capacity"]["spec"]["buffer_min"] == 1
+        assert result["capacity"]["status"]["available"] is None
 
-    def test_error_pool(self):
-        """Pool with Ready=False condition maps to 'error' with reason."""
+    def test_zero_capacity_pool_ready(self):
+        """Pool with poolMin=0 and bufferMin=0 maps to 'ready' without replicas."""
         provider = _make_provider()
         mock_pool = {
             "metadata": {"name": "tpl-abc123", "creationTimestamp": "2026-08-03T06:00:00Z"},
-            "status": {
-                "available": 0,
-                "total": 0,
-                "conditions": [{"type": "Ready", "status": "False", "message": "insufficient resources"}],
+            "spec": {
+                "capacitySpec": {"poolMin": 0, "bufferMin": 0, "poolMax": 0, "bufferMax": 0},
             },
+            "status": {"available": 0, "total": 0},
         }
         result = provider._map_pool_to_template_status(mock_pool)
-        assert result["status"] == "error"
-        assert result["reason"] is not None
-        assert result["reason"]["message"] == "insufficient resources"
-        assert result["reason"]["step"] == "create_fiber_pool"
+        assert result["status"] == "ready"
+        assert result["reason"] is None
+        assert result["capacity"]["spec"]["pool_min"] == 0
+        assert result["capacity"]["status"]["total"] == 0
+
+    def test_updated_at_fallback(self):
+        """updated_at falls back to creationTimestamp when status has no timestamp."""
+        provider = _make_provider()
+        mock_pool = {
+            "metadata": {"name": "tpl-abc123", "creationTimestamp": "2026-08-03T06:00:00Z"},
+            "spec": {
+                "capacitySpec": {"poolMin": 1, "poolMax": 10, "bufferMin": 1, "bufferMax": 3},
+            },
+            "status": {"available": 2, "total": 3},
+        }
+        result = provider._map_pool_to_template_status(mock_pool)
+        assert result["updated_at"] == "2026-08-03T06:00:00Z"
+
+
+class TestTemplateScaleRequest:
+    """Tests for TemplateScaleRequest validation."""
+
+    def test_valid_scale_request(self):
+        """All fields optional and valid."""
+        req = TemplateScaleRequest(pool_min=1, pool_max=10, buffer_min=1, buffer_max=3)
+        assert req.pool_min == 1
+        assert req.pool_max == 10
+        assert req.buffer_min == 1
+        assert req.buffer_max == 3
+
+    def test_patch_semantics_partial_fields(self):
+        """Only provided fields are set."""
+        req = TemplateScaleRequest(pool_min=5)
+        assert req.pool_min == 5
+        assert req.pool_max is None
+        assert req.buffer_min is None
+        assert req.buffer_max is None
+
+    def test_zero_capacity_allowed(self):
+        """pool_min=0 and buffer_min=0 are allowed."""
+        req = TemplateScaleRequest(pool_min=0, buffer_min=0)
+        assert req.pool_min == 0
+        assert req.buffer_min == 0
+
+    def test_negative_rejected(self):
+        """Negative capacity values are rejected."""
+        with pytest.raises(ValueError, match="pool_min must be >= 0"):
+            TemplateScaleRequest(pool_min=-1)
+
+    def test_min_exceeds_max_rejected(self):
+        """pool_min > pool_max and buffer_min > buffer_max are rejected."""
+        with pytest.raises(ValueError, match="pool_min must be <= pool_max"):
+            TemplateScaleRequest(pool_min=5, pool_max=3)
+        with pytest.raises(ValueError, match="buffer_min must be <= buffer_max"):
+            TemplateScaleRequest(buffer_min=5, buffer_max=3)
+
+
+@pytest.fixture
+def anyio_backend():
+    """Run anyio async tests on asyncio backend only."""
+    return "asyncio"
+
+
+class TestScaleTemplate:
+    """Tests for BatchSandboxProvider.scale_template."""
+
+    def _make_provider(self):
+        """Create a provider with mocked _pool_api and initialized flag."""
+        provider = object.__new__(BatchSandboxProvider)
+        provider._initialized = True
+        provider._pool_api = MockPoolApi()
+        return provider
+
+    @pytest.mark.anyio
+    async def test_scale_updates_capacity(self):
+        """Scale patches capacitySpec and returns mapped status."""
+        provider = self._make_provider()
+        provider._pool_api.existing_pool = {
+            "metadata": {"name": "tpl-abc", "creationTimestamp": "2026-08-03T06:00:00Z"},
+            "spec": {"capacitySpec": {"poolMin": 1, "poolMax": 10, "bufferMin": 1, "bufferMax": 3}},
+            "status": {"available": 2, "total": 3},
+        }
+
+        result = await provider.scale_template("tpl-abc", {"pool_min": 2, "pool_max": 20})
+
+        assert result["template_id"] == "tpl-abc"
+        assert result["status"] == "ready"
+        assert result["capacity"]["spec"]["pool_min"] == 1
+        assert result["capacity"]["status"]["available"] == 2
+        assert provider._pool_api.last_patch == {
+            "spec": {"capacitySpec": {"poolMin": 2, "poolMax": 20}}
+        }
+
+    @pytest.mark.anyio
+    async def test_scale_not_found(self):
+        """Scaling a non-existent template raises BadRequestRockError."""
+        provider = self._make_provider()
+        provider._pool_api.existing_pool = None
+
+        with pytest.raises(BadRequestRockError, match="Template tpl-missing not found"):
+            await provider.scale_template("tpl-missing", {"pool_min": 1})
+
+    @pytest.mark.anyio
+    async def test_scale_empty_capacity(self):
+        """Empty capacity dict raises BadRequestRockError."""
+        provider = self._make_provider()
+
+        with pytest.raises(BadRequestRockError, match="No capacity fields provided"):
+            await provider.scale_template("tpl-abc", {})
+
+    @pytest.mark.anyio
+    async def test_scale_invalid_field(self):
+        """Invalid capacity field raises BadRequestRockError."""
+        provider = self._make_provider()
+
+        with pytest.raises(BadRequestRockError, match="Invalid capacity fields"):
+            await provider.scale_template("tpl-abc", {"pool_min": 1, "unknown": 5})
+
+
+class MockPoolApi:
+    """Minimal mock for provider scale tests."""
+
+    def __init__(self):
+        self.existing_pool = None
+        self.last_patch = None
+
+    async def get_custom_object(self, name: str):
+        return self.existing_pool
+
+    async def update_custom_object(self, name: str, body: dict):
+        self.last_patch = body
+        return self.existing_pool
 
 
 class TestK8sConstants:

@@ -8,13 +8,14 @@ Template API 提供 Sandbox 预热池的创建与查询能力。调用方通过�
 | --- | --- |
 | `POST /apis/envs/sandbox/v1/templates` | 提交 Template 创建请求，同步返回 `templateID` 及状态 |
 | `GET /apis/envs/sandbox/v1/templates/{templateID}` | 查询 Template 当前状态 |
+| `POST /apis/envs/sandbox/v1/templates/{templateID}/scale` | 调整 Template 容量（PATCH 语义） |
 | `DELETE /apis/envs/sandbox/v1/templates/{templateID}` | 删除 Template（= 删除 Pool CRD） |
 
 ### 设计要点
 
 - **无独立存储**：K8s Pool CRD 即为持久化层，Informer 本地缓存提供高效读取，无需 DB。
 - **同步创建**：Pool CRD 创建不耗时，请求内同步完成，无需后台异步任务。
-- **天然去重**：相同 spec 生成相同 `templateID`（= Pool Name），K8s API Server 通过 409 Conflict 自动去重。
+- **天然去重**：相同 spec 生成相同 `templateID`（= Pool Name），K8s API Server 通过 409 Conflict 自动去重。容量字段不参与 `templateID` 计算。
 - **模版渲染**：Pool 的 PodTemplateSpec、capacitySpec 等通过 YAML 模版配置 + Jinja2 渲染。
 
 ### 概念说明
@@ -59,6 +60,13 @@ Operator 内部将 Template 概念转换为 Pool 操作：
     ├─ K8sApiClient(Pool).delete_custom_object()
     │    └─ 404 → not found = already deleted
     └─ K8s GC 自动清理 Pool 拥有的 Pod
+
+扩缩容 Template
+    ├─ templateID = Pool Name
+    ├─ 校验容量字段（pool_min/pool_max/buffer_min/buffer_max）
+    ├─ 仅将提供的非空字段 PATCH 到 Pool.spec.capacitySpec
+    ├─ K8sApiClient(Pool).update_custom_object()
+    └─ 返回更新后的 templateID + status + capacity
 ```
 
 ### 2.2 templateID 生成
@@ -67,7 +75,8 @@ Operator 内部将 Template 概念转换为 Pool 操作：
 
 - 格式：`tpl-{sha256(排序后的非空字段)[:16]}`
 - 前缀用连字符 `-`（符合 K8s RFC 1123 命名规范）
-- 一期非空字段：`from_image`、`cpu_count`、`memory_mb`；`disk_gb`/`num_gpus`/`accelerator_type` 为 null 时不参与哈希
+- 参与哈希的非空字段：`from_image`、`cpu_count`、`memory_mb`；`disk_gb`/`num_gpus`/`accelerator_type` 为 null 时不参与哈希
+- 容量字段（`pool_min`/`pool_max`/`buffer_min`/`buffer_max`）被排除在外，因为容量不影响 Template 身份
 
 ### 2.3 状态映射
 
@@ -81,13 +90,35 @@ Pool CRD status 字段为 `available`/`total`（非 `readyReplicas`/`replicas`�
 | `available == 0 && total == 0` | `building` | Controller 尚未处理或 Pool 为空 |
 | conditions 中 `Ready=False` | `error` | Pool 创建失败 |
 
+返回的 Template status 中还包含容量信息，结构如下：
+
+```json
+{
+  "capacity": {
+    "spec": {
+      "poolMin": ...,
+      "poolMax": ...,
+      "bufferMin": ...,
+      "bufferMax": ...
+    },
+    "status": {
+      "available": ...,
+      "total": ...,
+      "allocated": ...
+    }
+  }
+}
+```
+
 ### 2.4 Pool 标识
 
 Template API 创建的 Pool 携带 Label `rock.sandbox/managed-by: template-api`，与 Nacos 配置的系统 Pool 区分。
 
 ### 2.5 关于 Update
 
-不支持 Update。templateID 由 spec 的 hash 生成，改 spec 即产生新 templateID，本质是 create 而非 update。配置变更场景：创建新 Template → 更新引用方配置 → 删除旧 Template。
+不支持修改 Template 的 spec 字段（镜像、CPU、内存等）。templateID 由这些 spec 字段的 hash 生成，改 spec 即产生新 templateID，本质是 create 而非 update。配置变更场景：创建新 Template → 更新引用方配置 → 删除旧 Template。
+
+容量字段（`pool_min`/`pool_max`/`buffer_min`/`buffer_max`）可通过 `POST /templates/{templateID}/scale` 单独调整，采用 PATCH 语义：仅更新请求中提供的非空字段，允许缩容到 0，并在 `TemplateScaleRequest` 中校验 `min <= max`。
 
 ### 2.6 冒烟测试
 
@@ -113,7 +144,7 @@ pytest tests/smoke/ --admin-url http://localhost:8080 --smoke-image python:3.11
 - capacitySpec 使用 **camelCase** 键（`bufferMin`/`bufferMax`/`poolMin`/`poolMax`），匹配 Pool CRD spec
 - Jinja2 变量需加**双引号**（`"{{ from_image }}"`），避免 YAML flow mapping 解析错误
 - 渲染后 capacitySpec 值为字符串，需 `int()` 转换才能被 K8s 接受
-- 渲染上下文：`from_image`、`cpu_count`、`memory_mb`
+- 渲染上下文：`from_image`、`cpu_count`、`memory_mb`（容量字段不再来自 `TemplateSpec`，由 `pool_template` 默认配置提供）
 
 ### 3.2 关键常量
 
@@ -138,12 +169,13 @@ Provider 新增 Pool informer（复用同一 `ApiClient`，独立 watch `pools` 
 | 文件 | 变更 |
 | --- | --- |
 | `rock/sandbox/operator/k8s/constants.py` | 新增 Pool CRD 常量、Label 常量、`TEMPLATE_ID_PREFIX` |
-| `rock/sandbox/operator/k8s/provider.py` | 新增 Pool informer、template/pool 转换方法 |
-| `rock/sandbox/sandbox_manager.py` | 新增 template 代理方法 |
-| `rock/admin/entrypoints/template_api.py` | 新增 `template_router`（POST/GET/DELETE 端点） |
+| `rock/sandbox/operator/k8s/provider.py` | 新增 Pool informer、template/pool 转换方法、scale_template |
+| `rock/sandbox/sandbox_manager.py` | 新增 template 代理方法（含 scale_template） |
+| `rock/sandbox/operator/abstract.py` | 新增 `scale_template` 抽象方法默认实现 |
+| `rock/admin/entrypoints/template_api.py` | 新增 `template_router`（POST/GET/DELETE/SCALE 端点） |
 | `rock/admin/main.py` | 注册 `template_router`，prefix `/apis/envs/sandbox/v1` |
-| `rock/admin/proto/request.py` | 新增 `TemplateCreateRequest` |
-| `rock/admin/proto/response.py` | 新增 `TemplateCreateResponse` / `TemplateStatusResponse` |
+| `rock/admin/proto/request.py` | 新增 `TemplateCreateRequest` / `TemplateScaleRequest` |
+| `rock/admin/proto/response.py` | 新增 `TemplateCreateResponse` / `TemplateStatusResponse` / `TemplateCapacityResponse` |
 | `rock-conf/rock-junxin.yml` | 新增 `pool_template` 配置段 |
 | `tests/unit/test_template_api.py` | 单元测试：ID 生成、渲染、状态映射、常量 |
 | `tests/smoke/conftest.py` | 冒烟测试配置：`--admin-url` / `--smoke-image` |

@@ -103,6 +103,15 @@ class AbstractOperator(ABC):
 
         raise BadRequestRockError(f"template not supported on {type(self).__name__}")
 
+    async def scale_template(self, template_id: str, capacity: dict[str, Any]) -> dict:
+        """Scale a template's Pool capacity.
+
+        Only K8sOperator supports this; other operators raise BadRequestRockError.
+        """
+        from rock.sdk.common.exceptions import BadRequestRockError
+
+        raise BadRequestRockError(f"template not supported on {type(self).__name__}")
+
     def set_redis_provider(self, redis_provider: RedisProvider):
         self._redis_provider = redis_provider
 
