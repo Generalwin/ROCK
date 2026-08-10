@@ -46,14 +46,15 @@ class TemplateSpec:
     disk_gb: int | None = None
     num_gpus: float | None = None
     accelerator_type: str | None = None
+    os: str | None = None
 
 
 def generate_template_id(spec: TemplateSpec) -> str:
     """Generate template ID from all non-null TemplateSpec fields.
 
     The ID is a hash of every provided field, so any difference in
-    from_image, cpu_count, memory_mb, disk_gb, num_gpus, or accelerator_type
-    produces a distinct templateID. Capacity is excluded from identity.
+    from_image, cpu_count, memory_mb, disk_gb, num_gpus, accelerator_type,
+    or os produces a distinct templateID. Capacity is excluded from identity.
     """
     parts: list[str] = [
         f"from_image={spec.from_image}",
@@ -66,6 +67,8 @@ def generate_template_id(spec: TemplateSpec) -> str:
         parts.append(f"num_gpus={spec.num_gpus}")
     if spec.accelerator_type is not None:
         parts.append(f"accelerator_type={spec.accelerator_type}")
+    if spec.os is not None:
+        parts.append(f"os={spec.os}")
 
     raw = "|".join(parts)
     digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -328,7 +331,7 @@ class BatchSandboxProvider(K8sProvider):
         self._template_loader = K8sTemplateLoader(
             templates=k8s_config.templates,
             default_namespace=k8s_config.namespace,
-            pool_template=k8s_config.pool_template,
+            pool_templates=k8s_config.pool_templates,
         )
         logger.info(f"Available K8S templates: {', '.join(self._template_loader.available_templates)}")
 
@@ -1066,7 +1069,7 @@ class BatchSandboxProvider(K8sProvider):
             The created Pool object, or the existing Pool object if it already
             existed (409).
         """
-        manifest = self._build_pool_manifest_from_template(pool_name, spec)
+        manifest = self._template_loader.build_pool_manifest(pool_name, spec, template_name="default")
         try:
             pool = await self._pool_api.create_custom_object(body=manifest)
             logger.info(f"Created Pool {pool_name} for template")
@@ -1117,14 +1120,6 @@ class BatchSandboxProvider(K8sProvider):
         except Exception as e:
             logger.error(f"Unexpected error deleting Pool {pool_name}: {e}", exc_info=True)
             raise InternalServerRockError(f"Failed to delete Pool {pool_name}: {e}") from e
-
-    def _build_pool_manifest_from_template(self, pool_name: str, spec: TemplateSpec) -> dict[str, Any]:
-        """Build Pool CRD manifest from config template and spec.
-
-        Delegates to the shared K8sTemplateLoader so pool and sandbox template
-        rendering live in one place.
-        """
-        return self._template_loader.build_pool_manifest(pool_name, spec)
 
     def _map_pool_to_template_status(self, pool: dict) -> dict:
         """Map Pool CRD to template status dict (design doc format)."""

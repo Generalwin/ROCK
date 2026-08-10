@@ -1,15 +1,17 @@
-# ROCK Template API 设计文档
+# ROCK Template 管理设计文档
 
 ## 1. 概述
 
-Template API 提供 Sandbox 预热池的创建与查询能力。调用方通过提交镜像和资源规格创建 Template，获得稳定的 `templateID`。该 ID 对应一个 OpenSandbox Pool CRD，由 Pool Controller 自动维护热备 Pod。后续创建 Sandbox 时，`templateID` 作为 `poolRef` 被引用，实现秒级分配。
+Template 管理提供 Sandbox 预热池的创建与查询能力。调用方通过 operator 方法提交镜像和资源规格创建 Template，获得稳定的 `templateID`。该 ID 对应一个 OpenSandbox Pool CRD，由 Pool Controller 自动维护热备 Pod。后续创建 Sandbox 时，`templateID` 作为 `poolRef` 被引用，实现秒级分配。
 
-| 接口 | 说明 |
+Template 能力以 operator 方法形式交付，不以 HTTP 接口暴露。上层应用（如 OpenSandbox）可自行包装为 HTTP 接口。
+
+| Operator 方法 | 说明 |
 | --- | --- |
-| `POST /apis/envs/sandbox/v1/templates` | 提交 Template 创建请求，同步返回 `templateID` 及状态 |
-| `GET /apis/envs/sandbox/v1/templates/{templateID}` | 查询 Template 当前状态 |
-| `POST /apis/envs/sandbox/v1/templates/{templateID}/scale` | 调整 Template 容量（PATCH 语义） |
-| `DELETE /apis/envs/sandbox/v1/templates/{templateID}` | 删除 Template（= 删除 Pool CRD） |
+| `operator.create_template(spec)` | 提交 Template 创建请求，同步返回 `templateID` 及状态 |
+| `operator.get_template_status(template_id)` | 查询 Template 当前状态 |
+| `operator.scale_template(template_id, capacity)` | 调整 Template 容量（PATCH 语义） |
+| `operator.delete_template(template_id)` | 删除 Template（= 删除 Pool CRD） |
 
 ### 设计要点
 
@@ -20,7 +22,7 @@ Template API 提供 Sandbox 预热池的创建与查询能力。调用方通过�
 
 ### 概念说明
 
-外部 API 遵循 E2B 风格，使用 "Template" 概念。Template 是统一抽象——描述 Sandbox Pod 如何被创建的配置。差异只在交付机制：
+Template 遵循 E2B 风格概念，以 operator 方法形式交付（不以 HTTP 接口暴露）。Template 是统一抽象——描述 Sandbox Pod 如何被创建的配置。差异只在交付机制：
 
 | | Warm（当前实现） | Cold（未来可选，不实现） |
 | --- | --- | --- |
@@ -75,7 +77,7 @@ Operator 内部将 Template 概念转换为 Pool 操作：
 
 - 格式：`tpl-{sha256(排序后的非空字段)[:16]}`
 - 前缀用连字符 `-`（符合 K8s RFC 1123 命名规范）
-- 参与哈希的非空字段：`from_image`、`cpu_count`、`memory_mb`；`disk_gb`/`num_gpus`/`accelerator_type` 为 null 时不参与哈希
+- 参与哈希的非空字段：`from_image`、`cpu_count`、`memory_mb`；`disk_gb`/`num_gpus`/`accelerator_type`/`os` 为 null 时不参与哈希
 - 容量字段（`pool_min`/`pool_max`/`buffer_min`/`buffer_max`）被排除在外，因为容量不影响 Template 身份
 
 ### 2.3 状态映射
@@ -118,22 +120,11 @@ Template API 创建的 Pool 携带 Label `rock.sandbox/managed-by: template-api`
 
 不支持修改 Template 的 spec 字段（镜像、CPU、内存等）。templateID 由这些 spec 字段的 hash 生成，改 spec 即产生新 templateID，本质是 create 而非 update。配置变更场景：创建新 Template → 更新引用方配置 → 删除旧 Template。
 
-容量字段（`pool_min`/`pool_max`/`buffer_min`/`buffer_max`）可通过 `POST /templates/{templateID}/scale` 单独调整，采用 PATCH 语义：仅更新请求中提供的非空字段，允许缩容到 0，并在 `TemplateScaleRequest` 中校验 `min <= max`。
+容量字段（`pool_min`/`pool_max`/`buffer_min`/`buffer_max`）可通过 `operator.scale_template()` 单独调整，采用 PATCH 语义：仅更新提供的非空字段，允许缩容到 0，provider 层校验字段合法性与 `min <= max`。
 
 ### 2.6 冒烟测试
 
-`tests/smoke/` 通过命令行参数指定 admin 地址和镜像，不硬编码内部镜像：
-
-```bash
-pytest tests/smoke/ --admin-url http://localhost:8080 --smoke-image python:3.11
-```
-
-| Case | 覆盖链路 | 关键断言 |
-| --- | --- | --- |
-| `test_template_lifecycle` | create → wait ready → delete | templateID 以 `tpl-` 开头、status 变为 `ready`、删除成功 |
-| `test_template_idempotent_create` | 同 spec POST 两次 | 返回相同 templateID |
-
-两个 case 均通过 `try/finally` 保证失败时也清理模板。
+Template 不再以 HTTP 接口暴露，原 HTTP 冒烟测试已 skip。后续以 operator 方法调用形式重写冒烟测试。
 
 ## 3. 实现要点
 
@@ -143,8 +134,7 @@ pytest tests/smoke/ --admin-url http://localhost:8080 --smoke-image python:3.11
 
 - capacitySpec 使用 **camelCase** 键（`bufferMin`/`bufferMax`/`poolMin`/`poolMax`），匹配 Pool CRD spec
 - Jinja2 变量需加**双引号**（`"{{ from_image }}"`），避免 YAML flow mapping 解析错误
-- 渲染后 capacitySpec 值为字符串，需 `int()` 转换才能被 K8s 接受
-- 渲染上下文：`from_image`、`cpu_count`、`memory_mb`（容量字段不再来自 `TemplateSpec`，由 `pool_template` 默认配置提供）
+- 渲染上下文：`from_image`、`cpu_count`、`memory_mb`（必需）；`disk_gb`/`num_gpus`/`accelerator_type`/`os`（可选，为 null 时不传入 ctx）。容量字段不来自 `TemplateSpec`，由 `pool_template` 默认配置提供
 
 ### 3.2 关键常量
 
@@ -154,12 +144,13 @@ pytest tests/smoke/ --admin-url http://localhost:8080 --smoke-image python:3.11
 
 ### 3.3 BatchSandboxProvider 扩展
 
-Provider 新增 Pool informer（复用同一 `ApiClient`，独立 watch `pools` CRD），并提供三组方法：
+Provider 新增 Pool informer（复用同一 `ApiClient`，独立 watch `pools` CRD），并提供四组方法：
 
 | 外部方法（template 术语） | 内部方法（pool 术语） | 行为 |
 | --- | --- | --- |
 | `create_template(spec)` | `_create_pool(name, spec)` | 渲染 manifest → create_custom_object；409 时返回已有 Pool |
 | `get_template_status(id)` | `_get_pool(name)` | 从 Informer 缓存读取 Pool → 映射 status；未找到返回 None |
+| `scale_template(id, capacity)` | — | 校验字段 → PATCH capacitySpec → 返回更新后的 status |
 | `delete_template(id)` | `_delete_pool(name)` | delete_custom_object；404 视为已删除 |
 
 辅助方法：`_build_pool_manifest_from_template`（渲染）、`_map_pool_to_template_status`（状态映射）。
@@ -169,15 +160,12 @@ Provider 新增 Pool informer（复用同一 `ApiClient`，独立 watch `pools` 
 | 文件 | 变更 |
 | --- | --- |
 | `rock/sandbox/operator/k8s/constants.py` | 新增 Pool CRD 常量、Label 常量、`TEMPLATE_ID_PREFIX` |
-| `rock/sandbox/operator/k8s/provider.py` | 新增 Pool informer、template/pool 转换方法、scale_template |
-| `rock/sandbox/sandbox_manager.py` | 新增 template 代理方法（含 scale_template） |
-| `rock/sandbox/operator/abstract.py` | 新增 `scale_template` 抽象方法默认实现 |
-| `rock/admin/entrypoints/template_api.py` | 新增 `template_router`（POST/GET/DELETE/SCALE 端点） |
-| `rock/admin/main.py` | 注册 `template_router`，prefix `/apis/envs/sandbox/v1` |
-| `rock/admin/proto/request.py` | 新增 `TemplateCreateRequest` / `TemplateScaleRequest` |
-| `rock/admin/proto/response.py` | 新增 `TemplateCreateResponse` / `TemplateStatusResponse` / `TemplateCapacityResponse` |
+| `rock/sandbox/operator/k8s/provider.py` | 新增 Pool informer、template/pool 转换方法、`TemplateSpec`（含 `os` 字段）、`scale_template` |
+| `rock/sandbox/operator/k8s/template_loader.py` | 新增 `build_pool_manifest`，渲染上下文含 `os` 变量 |
+| `rock/sandbox/operator/k8s/operator.py` | 新增 `create_template`/`get_template_status`/`scale_template`/`delete_template` 委托方法 |
+| `rock/sandbox/operator/abstract.py` | 新增 `create_template`/`get_template_status`/`scale_template`/`delete_template` 抽象方法默认实现 |
 | `rock-conf/rock-junxin.yml` | 新增 `pool_template` 配置段 |
-| `tests/unit/test_template_api.py` | 单元测试：ID 生成、渲染、状态映射、常量 |
-| `tests/smoke/conftest.py` | 冒烟测试配置：`--admin-url` / `--smoke-image` |
-| `tests/smoke/test_template.py` | 冒烟测试：lifecycle + 幂等创建 |
+| `tests/unit/sandbox/operator/test_k8s_template_provider.py` | 单元测试：ID 生成、Spec、状态映射、scale、常量 |
+| `tests/unit/sandbox/operator/test_k8s_template_loader.py` | 单元测试：`build_pool_manifest` 渲染 |
+| `tests/smoke/test_template.py` | 冒烟测试（已 skip，待以方法调用形式重写） |
 

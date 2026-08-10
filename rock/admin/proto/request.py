@@ -1,7 +1,7 @@
 from typing import Annotated, Literal, TypedDict
 
 from fastapi import Header
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 from rock import env_vars
 from rock.actions import (
@@ -146,72 +146,6 @@ class SandboxWriteFileRequest(WriteFileRequest):
 
 class WarmupRequest(BaseModel):
     image: str = "python:3.11"
-
-
-class TemplateCreateRequest(BaseModel):
-    """Request body for creating a template (Warm path).
-
-    External fields use E2B-style camelCase; internal snake_case via alias.
-    Dedup key: all non-null fields. Capacity is excluded from identity.
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    from_image: NonBlankStr = Field(alias="fromImage")
-    cpu_count: int = Field(alias="cpuCount")
-    memory_mb: int = Field(alias="memoryMB")
-    disk_gb: int | None = Field(default=None, alias="diskGB")
-    num_gpus: float | None = Field(default=None, alias="numGpus")
-    accelerator_type: str | None = Field(default=None, alias="acceleratorType")
-
-    @field_validator("cpu_count")
-    @classmethod
-    def validate_cpu_count(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("cpuCount must be >= 1")
-        return v
-
-    @field_validator("memory_mb")
-    @classmethod
-    def validate_memory_mb(cls, v: int) -> int:
-        if v < 128:
-            raise ValueError("memoryMB must be >= 128")
-        return v
-
-
-class TemplateScaleRequest(BaseModel):
-    """Request body for scaling a template's Pool capacity.
-
-    PATCH semantics: only provided fields are updated. All fields are optional.
-    pool_min/buffer_min may be 0.
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    pool_min: int | None = Field(default=None, alias="poolMin")
-    pool_max: int | None = Field(default=None, alias="poolMax")
-    buffer_min: int | None = Field(default=None, alias="bufferMin")
-    buffer_max: int | None = Field(default=None, alias="bufferMax")
-
-    @field_validator("pool_min", "pool_max", "buffer_min", "buffer_max")
-    @classmethod
-    def validate_non_negative(cls, v: int | None, info) -> int | None:
-        if v is not None and v < 0:
-            raise ValueError(f"{info.field_name} must be >= 0")
-        return v
-
-    @model_validator(mode="after")
-    def validate_min_max(self):
-        pairs = [
-            ("pool_min", "pool_max"),
-            ("buffer_min", "buffer_max"),
-        ]
-        for min_field, max_field in pairs:
-            min_val = getattr(self, min_field)
-            max_val = getattr(self, max_field)
-            if min_val is not None and max_val is not None and min_val > max_val:
-                raise ValueError(f"{min_field} must be <= {max_field}")
-        return self
 
 
 class BatchSandboxStatusRequest(BaseModel):

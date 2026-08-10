@@ -20,18 +20,19 @@ class K8sTemplateLoader:
         self,
         templates: dict[str, dict[str, Any]],
         default_namespace: str = "rock",
-        pool_template: dict[str, Any] | None = None,
+        pool_templates: dict[str, dict[str, Any]] | None = None,
     ):
         """Initialize template loader.
 
         Args:
             templates: Dictionary of BatchSandbox template configurations from K8sConfig
             default_namespace: Default namespace if template doesn't specify one
-            pool_template: Optional Pool CRD template for Template API (Warm path)
+            pool_templates: Optional Pool CRD templates for Template API (Warm path).
+                Keyed by name (e.g. "default", "windows"); selected by TemplateSpec.os.
         """
         self._templates: dict[str, dict[str, Any]] = templates
         self._default_namespace = default_namespace
-        self._pool_template = pool_template
+        self._pool_templates: dict[str, dict[str, Any]] = pool_templates or {}
 
         if not self._templates:
             raise ValueError("No templates provided. At least one template must be defined in K8sConfig.templates.")
@@ -184,29 +185,37 @@ class K8sTemplateLoader:
 
         return manifest
 
-    def build_pool_manifest(self, pool_name: str, spec: Any) -> dict[str, Any]:
+    def build_pool_manifest(self, pool_name: str, spec: Any, template_name: str = "default") -> dict[str, Any]:
         """Build a complete Pool CRD manifest from the pool template and spec.
 
         The pool template is rendered with Jinja2 against a context built from
         ``spec``: from_image, cpu_count, memory_mb, disk_gb, num_gpus,
-        accelerator_type. Capacity fields (poolMin/poolMax/bufferMin/bufferMax)
+        accelerator_type, os. Capacity fields (poolMin/poolMax/bufferMin/bufferMax)
         are intentionally excluded from ``spec``; they are supplied by the pool
         template defaults and can be adjusted later via the Scale API.
 
         Args:
             pool_name: Name for the Pool CRD (also the template ID).
             spec: Template creation spec with the attributes listed above.
+            template_name: Name of the pool template to use (mirrors
+                ``build_manifest``'s ``template_name``).
 
         Returns:
             Complete Pool CRD manifest.
 
         Raises:
-            ValueError: If no pool template was configured.
+            ValueError: If no pool template was configured or the named
+                template is not found.
         """
-        if not self._pool_template:
-            raise ValueError("No pool template configured. Set k8s.pool_template in config.")
+        if not self._pool_templates:
+            raise ValueError("No pool template configured. Set k8s.pool_templates in config.")
 
-        template = copy.deepcopy(self._pool_template)
+        if template_name not in self._pool_templates:
+            available = ", ".join(self._pool_templates.keys())
+            raise ValueError(
+                f"Pool template '{template_name}' not found. Available: {available}"
+            )
+        template = copy.deepcopy(self._pool_templates[template_name])
 
         ctx: dict[str, Any] = {
             "from_image": spec.from_image,
@@ -219,6 +228,8 @@ class K8sTemplateLoader:
             ctx["num_gpus"] = spec.num_gpus
         if spec.accelerator_type is not None:
             ctx["accelerator_type"] = spec.accelerator_type
+        if spec.os is not None:
+            ctx["os"] = spec.os
 
         rendered = render_node(template, self._jinja_env, ctx)
 

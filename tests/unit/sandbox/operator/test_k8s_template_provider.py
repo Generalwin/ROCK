@@ -1,7 +1,15 @@
-"""Unit tests for Template API (Warm path) implementation."""
+"""Unit tests for BatchSandboxProvider template (Pool warm path) methods.
+
+Tests the operator/provider layer directly:
+- generate_template_id
+- TemplateSpec dataclass
+- _map_pool_to_template_status
+- scale_template
+- K8sConstants for Pool CRD
+"""
+
 import pytest
 
-from rock.admin.proto.request import TemplateScaleRequest
 from rock.sandbox.operator.k8s.constants import K8sConstants
 from rock.sandbox.operator.k8s.provider import BatchSandboxProvider, TemplateSpec, generate_template_id
 from rock.sdk.common.exceptions import BadRequestRockError
@@ -46,9 +54,19 @@ class TestGenerateTemplateId:
         with_accelerator = TemplateSpec(
             from_image="python:3.11", cpu_count=2, memory_mb=2048, accelerator_type="A100",
         )
+        with_os = TemplateSpec(
+            from_image="python:3.11", cpu_count=2, memory_mb=2048, os="linux",
+        )
         assert generate_template_id(base) != generate_template_id(with_disk)
         assert generate_template_id(base) != generate_template_id(with_gpu)
         assert generate_template_id(base) != generate_template_id(with_accelerator)
+        assert generate_template_id(base) != generate_template_id(with_os)
+
+    def test_different_os_different_id(self):
+        """Different os produces different template IDs."""
+        spec1 = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048, os="linux")
+        spec2 = TemplateSpec(from_image="python:3.11", cpu_count=2, memory_mb=2048, os="windows")
+        assert generate_template_id(spec1) != generate_template_id(spec2)
 
     def test_id_has_prefix(self):
         """Template ID starts with the configured prefix."""
@@ -73,6 +91,7 @@ class TestTemplateSpec:
         assert spec.disk_gb is None
         assert spec.num_gpus is None
         assert spec.accelerator_type is None
+        assert spec.os is None
 
     def test_capacity_fields_removed(self):
         """Capacity fields are excluded from TemplateSpec identity."""
@@ -171,48 +190,25 @@ class TestMapPoolToTemplateStatus:
         assert result["updated_at"] == "2026-08-03T06:00:00Z"
 
 
-class TestTemplateScaleRequest:
-    """Tests for TemplateScaleRequest validation."""
-
-    def test_valid_scale_request(self):
-        """All fields optional and valid."""
-        req = TemplateScaleRequest(pool_min=1, pool_max=10, buffer_min=1, buffer_max=3)
-        assert req.pool_min == 1
-        assert req.pool_max == 10
-        assert req.buffer_min == 1
-        assert req.buffer_max == 3
-
-    def test_patch_semantics_partial_fields(self):
-        """Only provided fields are set."""
-        req = TemplateScaleRequest(pool_min=5)
-        assert req.pool_min == 5
-        assert req.pool_max is None
-        assert req.buffer_min is None
-        assert req.buffer_max is None
-
-    def test_zero_capacity_allowed(self):
-        """pool_min=0 and buffer_min=0 are allowed."""
-        req = TemplateScaleRequest(pool_min=0, buffer_min=0)
-        assert req.pool_min == 0
-        assert req.buffer_min == 0
-
-    def test_negative_rejected(self):
-        """Negative capacity values are rejected."""
-        with pytest.raises(ValueError, match="pool_min must be >= 0"):
-            TemplateScaleRequest(pool_min=-1)
-
-    def test_min_exceeds_max_rejected(self):
-        """pool_min > pool_max and buffer_min > buffer_max are rejected."""
-        with pytest.raises(ValueError, match="pool_min must be <= pool_max"):
-            TemplateScaleRequest(pool_min=5, pool_max=3)
-        with pytest.raises(ValueError, match="buffer_min must be <= buffer_max"):
-            TemplateScaleRequest(buffer_min=5, buffer_max=3)
-
-
 @pytest.fixture
 def anyio_backend():
     """Run anyio async tests on asyncio backend only."""
     return "asyncio"
+
+
+class MockPoolApi:
+    """Minimal mock for provider scale tests."""
+
+    def __init__(self):
+        self.existing_pool = None
+        self.last_patch = None
+
+    async def get_custom_object(self, name: str):
+        return self.existing_pool
+
+    async def update_custom_object(self, name: str, body: dict):
+        self.last_patch = body
+        return self.existing_pool
 
 
 class TestScaleTemplate:
@@ -269,21 +265,6 @@ class TestScaleTemplate:
 
         with pytest.raises(BadRequestRockError, match="Invalid capacity fields"):
             await provider.scale_template("tpl-abc", {"pool_min": 1, "unknown": 5})
-
-
-class MockPoolApi:
-    """Minimal mock for provider scale tests."""
-
-    def __init__(self):
-        self.existing_pool = None
-        self.last_patch = None
-
-    async def get_custom_object(self, name: str):
-        return self.existing_pool
-
-    async def update_custom_object(self, name: str, body: dict):
-        self.last_patch = body
-        return self.existing_pool
 
 
 class TestK8sConstants:
