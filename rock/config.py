@@ -389,6 +389,12 @@ class K8sConfig:
     # ROCK_IMAGE_AUTH_KEY environment variable if not set here.
     image_auth_key: str | None = None
 
+    # Pool rendering templates for Template API (Warm path).
+    # Keyed by name (e.g. "default", "windows"); rendered via Jinja2 to produce
+    # Pool CRD spec. Selected by TemplateSpec.os at create time, falling back to
+    # "default".
+    pool_templates: dict[str, dict] = field(default_factory=dict)
+
     # ============================================================================
     # DEPRECATED: The following fields are deprecated and will be removed in a
     # future version. Do NOT use them in new code.

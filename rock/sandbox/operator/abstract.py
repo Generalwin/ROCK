@@ -1,6 +1,10 @@
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any
 
 from rock.actions.sandbox.sandbox_info import SandboxInfo
+
+if TYPE_CHECKING:
+    from rock.sandbox.operator.k8s.provider import TemplateSpec
 from rock.admin.core.redis_key import alive_sandbox_key
 from rock.common.constants import StopReason
 from rock.config import RuntimeConfig
@@ -66,6 +70,47 @@ class AbstractOperator(ABC):
         from rock.deployments.status import ServiceStatus
 
         return ServiceStatus()
+
+    # ========================================================================
+    # Template API (Warm path) — default: raise NotImplementedError
+    # ========================================================================
+
+    async def create_template(self, spec: Any) -> dict:
+        """Create or reuse a template (Pool CRD).
+
+        Only K8sOperator supports this; other operators raise BadRequestRockError.
+        Returns a dict with template_id and status.
+        """
+        from rock.sdk.common.exceptions import BadRequestRockError
+
+        raise BadRequestRockError(f"template not supported on {type(self).__name__}")
+
+    async def get_template_status(self, template_id: str) -> dict | None:
+        """Get template (Pool) status.
+
+        Only K8sOperator supports this; other operators raise BadRequestRockError.
+        """
+        from rock.sdk.common.exceptions import BadRequestRockError
+
+        raise BadRequestRockError(f"template not supported on {type(self).__name__}")
+
+    async def delete_template(self, template_id: str) -> bool:
+        """Delete template (Pool CRD).
+
+        Only K8sOperator supports this; other operators raise BadRequestRockError.
+        """
+        from rock.sdk.common.exceptions import BadRequestRockError
+
+        raise BadRequestRockError(f"template not supported on {type(self).__name__}")
+
+    async def scale_template(self, template_id: str, capacity: dict[str, Any]) -> dict:
+        """Scale a template's Pool capacity.
+
+        Only K8sOperator supports this; other operators raise BadRequestRockError.
+        """
+        from rock.sdk.common.exceptions import BadRequestRockError
+
+        raise BadRequestRockError(f"template not supported on {type(self).__name__}")
 
     def set_redis_provider(self, redis_provider: RedisProvider):
         self._redis_provider = redis_provider
