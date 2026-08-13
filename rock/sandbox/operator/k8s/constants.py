@@ -42,3 +42,4 @@ class K8sConstants:
 
     # templateID prefix
     TEMPLATE_ID_PREFIX = "tpl-"
+    K8S_ALIVE_CHECK_SWITCH = "k8s_alive_check_enabled"

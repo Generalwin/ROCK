@@ -20,6 +20,13 @@ class TestK8sOperator:
             operator = K8sOperator(k8s_config=k8s_config)
             assert operator._provider is not None
 
+    def test_initialization_forwards_template_table(self, k8s_config):
+        template_table = AsyncMock()
+        with patch("rock.sandbox.operator.k8s.operator.BatchSandboxProvider") as provider_class:
+            K8sOperator(k8s_config=k8s_config, template_table=template_table)
+
+        provider_class.assert_called_once_with(k8s_config=k8s_config, template_table=template_table)
+
     def test_initialization_without_templates(self):
         """Test K8sOperator initialization fails without templates."""
         config = K8sConfig(kubeconfig_path=None, templates={})
@@ -157,6 +164,14 @@ class TestK8sOperator:
         result = await k8s_operator.stop("test-sandbox")
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_delete_is_noop(self, k8s_operator, mock_provider, deployment_config):
+        """K8s resources are already removed by stop, so delete is a successful no-op."""
+        result = await k8s_operator.delete(deployment_config, host_ip="10.0.0.1")
+
+        assert result is True
+        assert mock_provider.mock_calls == []
 
     @pytest.mark.asyncio
     async def test_get_sandbox_info_from_redis_success(self, k8s_operator, mock_provider, redis_provider):

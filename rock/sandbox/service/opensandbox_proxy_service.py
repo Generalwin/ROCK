@@ -34,7 +34,8 @@ from rock.sandbox.operator.opensandbox.session_registry import OpenSandboxSessio
 from rock.sandbox.sandbox_meta_store import SandboxMetaStore
 from rock.sandbox.service.backends.opensandbox import OpenSandboxBackend
 from rock.sandbox.service.sandbox_proxy_service import SandboxProxyService
-from rock.sdk.common.exceptions import BadRequestRockError
+from rock.sandbox.utils.timeout import SandboxTimeoutHelper
+from rock.sdk.common.exceptions import BadRequestRockError, SandboxNotFoundRockError
 
 OPENSANDBOX_BACKEND = "opensandbox"
 logger = init_logger(__name__)
@@ -84,6 +85,7 @@ class OpenSandboxProxyService(SandboxProxyService):
     async def create_session(self, request: CreateSessionRequest) -> CreateBashSessionResponse:
         await self._update_expire_time(request.sandbox_id)
         info = await self._get_runtime_info(request.sandbox_id)
+        request = request.model_copy(update={"env": self._merge_sandbox_env(info, request.env)})
         reservation = await self._session_registry.reserve(request.sandbox_id, request.session)
         if reservation is None:
             raise SessionExistsError(f"session {request.session!r} already exists")
@@ -164,6 +166,7 @@ class OpenSandboxProxyService(SandboxProxyService):
     async def execute(self, command: Command) -> CommandResponse:
         await self._update_expire_time(command.sandbox_id)
         info = await self._get_runtime_info(command.sandbox_id)
+        command = command.model_copy(update={"env": self._merge_sandbox_env(info, command.env)})
         return await self._opensandbox_backend.execute(command.sandbox_id, info, command)
 
     def _service_url(self, endpoint: str, target_path: str | None, query_string: str = "", *, websocket=False) -> str:
@@ -255,12 +258,12 @@ class OpenSandboxProxyService(SandboxProxyService):
     async def get_status(self, sandbox_id: str, include_all_states: bool = False) -> SandboxStatusResponse:
         sandbox_info = await self._meta_store.get(sandbox_id, check_db=True)
         if sandbox_info is None:
-            raise BadRequestRockError(f"Sandbox {sandbox_id} not found")
+            raise SandboxNotFoundRockError(f"Sandbox {sandbox_id} not found")
         self._validate_backend(sandbox_info)
 
         state = sandbox_info.get("state")
         if not include_all_states and state not in (State.PENDING, State.RUNNING):
-            raise BadRequestRockError(f"Sandbox {sandbox_id} not found")
+            raise SandboxNotFoundRockError(f"Sandbox {sandbox_id} not found")
 
         is_alive = False
         operator_sandbox_info = None
@@ -285,6 +288,12 @@ class OpenSandboxProxyService(SandboxProxyService):
             sandbox_info = sm.sandbox_info
 
         info = operator_sandbox_info if operator_sandbox_info is not None else sandbox_info
+        timeout_info = await self._meta_store.get_timeout(sandbox_id)
+        auto_stop_time, auto_archive_time, auto_delete_time = SandboxTimeoutHelper.auto_transition_times_for_status(
+            info.get("state"),
+            info,
+            timeout_info,
+        )
         return SandboxStatusResponse(
             sandbox_id=sandbox_id,
             status=info.get("phases"),
@@ -294,6 +303,7 @@ class OpenSandboxProxyService(SandboxProxyService):
             host_ip=info.get("host_ip"),
             is_alive=is_alive,
             image=info.get("image"),
+            metadata=info.get("metadata"),
             swe_rex_version=None,
             gateway_version=gateway_version,
             user_id=info.get("user_id"),
@@ -308,6 +318,10 @@ class OpenSandboxProxyService(SandboxProxyService):
             start_time=info.get("start_time"),
             stop_time=info.get("stop_time"),
             create_time=info.get("create_time"),
+            archive_time=info.get("archive_time"),
             delete_time=info.get("delete_time"),
+            auto_stop_time=auto_stop_time,
+            auto_archive_time=auto_archive_time,
+            auto_delete_time=auto_delete_time,
             state_history=sandbox_info.get("state_history", []),
         )

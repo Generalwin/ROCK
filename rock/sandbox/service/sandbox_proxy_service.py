@@ -49,7 +49,12 @@ from rock.sandbox.service.commit_worker import CommitWorkerExecutor
 from rock.sandbox.utils.proxy import BLOCKED_WS_HEADER_NAMES, build_upstream_ws_headers
 from rock.sandbox.utils.rocklet_probe import check_alive_status, get_remote_status
 from rock.sandbox.utils.timeout import SandboxTimeoutHelper
-from rock.sdk.common.exceptions import BadRequestRockError, InternalServerRockError, WorkerCommitError
+from rock.sdk.common.exceptions import (
+    BadRequestRockError,
+    InternalServerRockError,
+    SandboxNotFoundRockError,
+    WorkerCommitError,
+)
 from rock.rocklet import __version__ as swe_version
 from rock.sandbox import __version__ as gateway_version
 from rock.utils import EAGLE_EYE_TRACE_ID, trace_id_ctx_var
@@ -170,13 +175,20 @@ class SandboxProxyService:
                 ", ".join(missing),
             )
 
+    @staticmethod
+    def _merge_sandbox_env(sandbox_info: SandboxInfo, request_env: dict[str, str] | None) -> dict[str, str] | None:
+        merged_env = {**sandbox_info.get("env", {}), **(request_env or {})}
+        return merged_env or None
+
     @monitor_sandbox_operation()
     async def create_session(self, request: CreateSessionRequest) -> CreateBashSessionResponse:
         sandbox_id = request.sandbox_id
         await self._update_expire_time(sandbox_id)
         sandbox_status_dicts = await self.get_service_status(sandbox_id)
+        payload = request.model_dump()
+        payload["env"] = self._merge_sandbox_env(sandbox_status_dicts[0], request.env)
         response = await self._send_request(
-            sandbox_id, sandbox_status_dicts[0], "create_session", None, request.model_dump(), None, "POST"
+            sandbox_id, sandbox_status_dicts[0], "create_session", None, payload, None, "POST"
         )
         return CreateBashSessionResponse(**response)
 
@@ -247,9 +259,9 @@ class SandboxProxyService:
         sandbox_id = command.sandbox_id
         await self._update_expire_time(sandbox_id)
         sandbox_status_dicts = await self.get_service_status(sandbox_id)
-        response = await self._send_request(
-            sandbox_id, sandbox_status_dicts[0], "execute", None, command.model_dump(), None, "POST"
-        )
+        payload = command.model_dump()
+        payload["env"] = self._merge_sandbox_env(sandbox_status_dicts[0], command.env)
+        response = await self._send_request(sandbox_id, sandbox_status_dicts[0], "execute", None, payload, None, "POST")
         return CommandResponse(**response)
 
     @monitor_sandbox_operation()
@@ -729,7 +741,8 @@ class SandboxProxyService:
         full_request_url = f"{api_url}/{path}"
         logger.info(f"full_request_url: {full_request_url}")
         logger.info(f"data: {data}")
-        logger.info(f"json_data: {json_data}")
+        logged_json_data = {**json_data, "env": "<redacted>"} if json_data and "env" in json_data else json_data
+        logger.info("json_data: %s", logged_json_data)
 
         # Make request
         try:
@@ -1124,7 +1137,7 @@ class SandboxProxyService:
         """
         sandbox_info = await self._meta_store.get(sandbox_id, check_db=True)
         if sandbox_info is None:
-            raise BadRequestRockError(f"Sandbox {sandbox_id} not found")
+            raise SandboxNotFoundRockError(f"Sandbox {sandbox_id} not found")
 
         state = sandbox_info.get("state")
         host_ip = sandbox_info.get("host_ip")
@@ -1156,7 +1169,7 @@ class SandboxProxyService:
                 sandbox_info = sm.sandbox_info
 
         if not include_all_states and state not in (State.PENDING, State.RUNNING):
-            raise BadRequestRockError(f"Sandbox {sandbox_id} not found")
+            raise SandboxNotFoundRockError(f"Sandbox {sandbox_id} not found")
 
         info = operator_sandbox_info if operator_sandbox_info is not None else sandbox_info
         timeout_info = await self._meta_store.get_timeout(sandbox_id)
@@ -1175,6 +1188,7 @@ class SandboxProxyService:
             host_ip=host_ip,
             is_alive=is_alive,
             image=info.get("image"),
+            metadata=info.get("metadata"),
             swe_rex_version=swe_version,
             gateway_version=gateway_version,
             user_id=info.get("user_id"),

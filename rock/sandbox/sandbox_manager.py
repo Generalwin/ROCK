@@ -54,7 +54,7 @@ from rock.utils.system import get_iso8601_timestamp
 logger = init_logger(__name__)
 
 # Bound batch-wide fan-out to protect the Ray control plane.
-_AUTO_DELETE_CONCURRENCY = 20
+_AUTO_DELETE_CONCURRENCY = 50
 
 
 class SandboxManager(BaseManager):
@@ -86,6 +86,10 @@ class SandboxManager(BaseManager):
         self._aes_encrypter = AESEncryption(aes_encrypt_key)
         self._proxy_service = create_sandbox_proxy_service(rock_config=rock_config, meta_store=meta_store)
         logger.info("sandbox service init success")
+
+    @property
+    def supports_running_delete(self) -> bool:
+        return bool(self._operator and self._operator.supports_running_delete)
 
     def _init_archive_storage(self, rock_config: RockConfig) -> None:
         archive_cfg = rock_config.lifecycle.archive
@@ -164,6 +168,8 @@ class SandboxManager(BaseManager):
         sandbox_info: SandboxInfo = {
             "sandbox_id": sandbox_id,
             "image": docker_deployment_config.image,
+            "metadata": dict(docker_deployment_config.metadata),
+            "env": dict(docker_deployment_config.env_vars),
             "cpus": docker_deployment_config.cpus,
             "memory": docker_deployment_config.memory,
             "num_gpus": docker_deployment_config.num_gpus,
@@ -280,8 +286,13 @@ class SandboxManager(BaseManager):
         )
 
     @monitor_sandbox_operation()
-    async def start(self, config: DeploymentConfig) -> SandboxStartResponse:
-        response = await self.start_async(config)
+    async def start(
+        self,
+        config: DeploymentConfig,
+        user_info: UserInfo = {},
+        cluster_info: ClusterInfo = {},
+    ) -> SandboxStartResponse:
+        response = await self.start_async(config, user_info=user_info, cluster_info=cluster_info)
         sandbox_id = response.sandbox_id
         deadline = time.time() + REQUEST_TIMEOUT_SECONDS
         with StageTimer("startup_timing", f"[{sandbox_id}] Wait sandbox running", logger):
@@ -470,6 +481,7 @@ class SandboxManager(BaseManager):
             host_ip=sandbox_info.get("host_ip"),
             is_alive=is_alive,
             image=sandbox_info.get("image"),
+            metadata=sandbox_info.get("metadata"),
             swe_rex_version=swe_version,
             gateway_version=gateway_version,
             user_id=sandbox_info.get("user_id"),
@@ -595,7 +607,7 @@ class SandboxManager(BaseManager):
                 State.STOPPED.value,
                 State.DELETED.value,
                 now,
-                limit=1000,
+                limit=2000,
             )
         except Exception as e:
             logger.warning(f"[auto_delete] list_expired_by failed: {e}")

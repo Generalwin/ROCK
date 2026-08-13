@@ -1,10 +1,27 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from rock.actions import SandboxResponse
 from rock.actions.sandbox.response import State, StateTransitionRecord
 from rock.actions.sandbox.sandbox_info import SandboxInfo
 from rock.admin.proto.request import TaskSetSpec
 from rock.sandbox.utils.timeout import SandboxTimeoutHelper
+
+
+class E2BCreateSandboxResponse(BaseModel):
+    sandbox_id: str = Field(alias="sandboxID")
+    envd_version: str = Field(alias="envdVersion")
+    client_id: str = Field(alias="clientID")
+    template_id: str = Field(alias="templateID")
+
+
+class E2BListedSandbox(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    sandbox_id: str = Field(alias="sandboxID")
+    metadata: dict[str, str]
+    state: Literal["running", "paused"]
 
 
 class SandboxStartResponse(SandboxResponse):
@@ -27,6 +44,7 @@ class SandboxStatusResponse(BaseModel):
     host_ip: str | None = None
     is_alive: bool = True
     image: str | None = None
+    metadata: dict[str, str] | None = None
     gateway_version: str | None = None
     swe_rex_version: str | None = None
     user_id: str | None = None
@@ -62,6 +80,7 @@ class SandboxStatusResponse(BaseModel):
             host_ip=sandbox_info.get("host_ip"),
             host_name=sandbox_info.get("host_name"),
             image=sandbox_info.get("image"),
+            metadata=sandbox_info.get("metadata"),
             user_id=sandbox_info.get("user_id"),
             experiment_id=sandbox_info.get("experiment_id"),
             namespace=sandbox_info.get("namespace"),
@@ -81,6 +100,22 @@ class SandboxStatusResponse(BaseModel):
             auto_delete_time=auto_delete_time,
             state_history=sandbox_info.get("state_history", []),
         )
+
+
+class E2BSandboxDetail(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    sandbox_id: str = Field(alias="sandboxID")
+    metadata: dict[str, str]
+    state: Literal["running", "paused"]
+    client_id: str = Field(alias="clientID")
+    template_id: str = Field(alias="templateID")
+    envd_version: str = Field(alias="envdVersion")
+    cpu_count: int = Field(alias="cpuCount")
+    memory_mb: int = Field(alias="memoryMB")
+    disk_size_mb: int = Field(alias="diskSizeMB")
+    started_at: str = Field(alias="startedAt")
+    end_at: str = Field(alias="endAt")
 
 
 class SandboxListStatusResponse(SandboxStatusResponse):

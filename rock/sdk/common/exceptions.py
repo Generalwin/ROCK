@@ -9,6 +9,10 @@ class WorkerCommitError(Exception):
         self.code = code
 
 
+class E2BSandboxNotFoundError(Exception):
+    pass
+
+
 class RockException(Exception):
     _code: codes = None
 
@@ -30,6 +34,10 @@ class InvalidParameterRockException(RockException):
 class BadRequestRockError(RockException):
     def __init__(self, message, code: codes = codes.BAD_REQUEST):
         super().__init__(message, code)
+
+
+class SandboxNotFoundRockError(BadRequestRockError):
+    pass
 
 
 class InternalServerRockError(RockException):

@@ -11,6 +11,10 @@ def _paths(app: FastAPI) -> set[str]:
     return {getattr(r, "path", "") for r in app.routes}
 
 
+def _methods_for_path(app: FastAPI, path: str) -> set[str]:
+    return {method for route in app.routes if getattr(route, "path", "") == path for method in route.methods or set()}
+
+
 def test_proxy_role_mounts_proxy_router():
     app = FastAPI()
     _include_routers(app, role="proxy")
@@ -20,6 +24,9 @@ def test_proxy_role_mounts_proxy_router():
     assert any(p.endswith("/get_token") for p in paths)
     assert commit_path in paths
     assert commit_status_path in paths
+    assert "/sandboxes" not in paths
+    assert _methods_for_path(app, "/sandboxes/{sandboxID}") == {"GET"}
+    assert "/v2/sandboxes" in paths
 
 
 def test_proxy_role_excludes_admin_router():
@@ -38,6 +45,9 @@ def test_admin_role_mounts_admin_routers():
     assert any("/ops" in p for p in paths)
     assert commit_path in paths
     assert commit_status_path not in paths
+    assert "/sandboxes" in paths
+    assert _methods_for_path(app, "/sandboxes/{sandboxID}") == {"DELETE"}
+    assert "/v2/sandboxes" not in paths
 
 
 @pytest.mark.skipif(not hasattr(socket, "SO_REUSEPORT"), reason="SO_REUSEPORT unavailable")
