@@ -3,16 +3,12 @@ from rock.admin.proto.request import ClusterInfo, UserInfo
 from rock.admin.proto.response import E2BSandboxInfo, SandboxStartResponse, SandboxStatusResponse
 from rock.admin.service.e2b_sandbox_info import e2b_sandbox_info_fields
 from rock.deployments.config import DockerDeploymentConfig
+from rock.logger import init_logger
 from rock.sandbox.sandbox_manager import SandboxManager
 from rock.sdk.common.exceptions import BadRequestRockError, E2BSandboxNotFoundError
+from rock.utils.format import megabytes_to_size
 
-_MEGABYTES_PER_GIGABYTE = 1024
-
-
-def _e2b_megabytes_to_rock_size(megabytes: int) -> str:
-    if megabytes % _MEGABYTES_PER_GIGABYTE == 0:
-        return f"{megabytes // _MEGABYTES_PER_GIGABYTE}g"
-    return f"{megabytes}m"
+logger = init_logger(__name__)
 
 
 class E2BService:
@@ -26,17 +22,19 @@ class E2BService:
         user_info: UserInfo = {},
         cluster_info: ClusterInfo = {},
     ) -> SandboxStartResponse:
-        resource_spec = await self._template_table.get_ready_resource_spec(config.image)
-        if resource_spec is None:
-            raise BadRequestRockError(f"Template {config.image} is not ready or does not exist")
-
-        template_config = config.model_copy(
-            update={
-                "cpus": resource_spec["cpu_count"],
-                "memory": _e2b_megabytes_to_rock_size(resource_spec["memory_mb"]),
-                "disk": _e2b_megabytes_to_rock_size(resource_spec["disk_size_mb"]),
-            }
-        )
+        template = await self._template_table.get_ready_template(config.image)
+        if template is None:
+            logger.info("Template %s is not ready or does not exist; using request config", config.image)
+            template_config = config
+        else:
+            template_config = config.model_copy(
+                update={
+                    "image": template["image"] or config.image,
+                    "cpus": template["cpu_count"],
+                    "memory": megabytes_to_size(template["memory_mb"]),
+                    "disk": megabytes_to_size(template["disk_size_mb"]),
+                }
+            )
         return await self._sandbox_manager.start_from_template(
             template_config,
             user_info=user_info,
