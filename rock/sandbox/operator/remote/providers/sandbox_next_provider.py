@@ -174,21 +174,11 @@ class SandboxNextProvider:
         endpoint_template = access.get("endpoint_template", "")
         agent_token = access.get("agent_token", "")
 
+        # Only return fields that change at runtime; static fields are already in redis.
         info: SandboxInfo = {
-            "sandbox_id": remote_sandbox_id,
-            "host_name": remote_sandbox_id,
             "state": _map_state(sn_state, self._state_map),
             "host_ip": endpoint_template,
-            "port_mapping": {
-                Port.PROXY: 8000,
-                Port.SERVER: 8080,
-                Port.SSH: 22,
-            },
             "auth_token": agent_token,
-            "extended_params": {
-                EXT_BACKEND: BACKEND_NAME,
-                EXT_ENDPOINT: endpoint_template,
-            },
         }
         return info
 

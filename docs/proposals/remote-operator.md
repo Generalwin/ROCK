@@ -67,7 +67,7 @@ ProxyService (复用现有)
 | `stop` | `(remote_sandbox_id: str) → bool` | 停止沙箱（暂停或终止，语义由 provider 定义） |
 | `delete` | `(remote_sandbox_id: str) → bool` | 永久删除沙箱，已不存在返回 True |
 
-`remote_id` 由 RemoteOperator 从 Redis 缓存的 `extended_params` 中解析后传入，provider 不直接依赖 Redis。
+`remote_id` 由 RemoteOperator 从 Redis 缓存的 `host_name` 字段中解析后传入，provider 不直接依赖 Redis。
 
 **Template API（可选）：**
 
@@ -88,8 +88,8 @@ Template 方法默认 raise `NotImplementedError`，RemoteOperator 捕获后转�
 | 方法 | 行为 |
 |------|------|
 | `submit` | 直接委托 `provider.submit()` |
-| `get_status` | ① Redis 获取用户元数据 → ② 解析 `remote_sandbox_id` → ③ 委托 `provider.get_status()` → ④ 合并（provider 实时状态优先，深合并 `extended_params`） |
-| `stop` | 从 Redis 解析 `remote_sandbox_id` → 委托 `provider.stop()` |
+| `get_status` | ① Redis 获取用户元数据 → ② 解析 `remote_sandbox_id`（`host_name`） → ③ 委托 `provider.get_status()` → ④ 返回 `{**provider_info, "sandbox_id": redis_info["sandbox_id"]}` |
+| `stop` | 从 Redis 解析 `remote_sandbox_id` → 委托 `provider.stop()`（当前与 `delete` 同语义） |
 | `delete` | 从 Redis 解析 `remote_sandbox_id` → 委托 `provider.delete()` |
 | `restart` | 不支持，raise `BadRequestRockError` |
 | `create_template` | 委托 provider，`NotImplementedError` → `BadRequestRockError` |
@@ -120,18 +120,14 @@ Template 方法默认 raise `NotImplementedError`，RemoteOperator 捕获后转�
 
 | Provider 方法 | SandboxNext API | 关键映射 |
 |---------------|-----------------|----------|
-| `submit` | `POST /v1/sandboxes` | `request_id` = Rock `sandbox_id`（幂等键），`resources` 从 `DockerDeploymentConfig` 转换；响应中 `sandbox_id` → `extended_params.remote_sandbox_id`，`access.agent_token` → `auth_token`，`access.endpoint_template` → `host_ip` + `extended_params.endpoint_template` |
+| `submit` | `POST /v1/sandboxes` | `request_id` = Rock `sandbox_id`（幂等键），`resources` 从 `DockerDeploymentConfig` 转换；响应中 `sandbox_id` → `host_name`（remote sandbox id），`access.agent_token` → `auth_token`，`access.endpoint_template` → `host_ip` + `extended_params.endpoint_template` |
 | `get_status` | `GET /v1/sandboxes/{id}` | 404 → 返回 None；否则映射状态 |
-| `stop` | `POST /v1/sandboxes/{id}/pause` | 501（不支持）→ 降级为 `delete` |
+| `stop` | `DELETE /v1/sandboxes/{id}` | 与 `delete` 同语义 |
 | `delete` | `DELETE /v1/sandboxes/{id}` | 404 → 返回 True |
 
 #### Template 方法映射
 
-| Provider 方法 | SandboxNext API | 关键映射 |
-|---------------|-----------------|----------|
-| `create_template` | `POST /v1/templates` | `TemplateSpec` → `NewTemplate`；409 → 幂等回退 GET；501 → `NotImplementedError` |
-| `get_template_status` | `GET /v1/templates/{id}` | 404 → 返回 None |
-| `delete_template` | `DELETE /v1/templates/{id}` | 404 → 返回 True；501 → `NotImplementedError` |
+当前 `SandboxNextProvider` 暂未实现 Template API，`create_template` / `get_template_status` / `delete_template` 均直接抛出 `NotImplementedError`，由 `RemoteOperator` 转换为 `BadRequestRockError`。
 
 #### 状态映射
 
@@ -157,7 +153,7 @@ Provider 在 `submit()` 返回的 `SandboxInfo` 中填充：
 | `host_ip` | `access.endpoint_template` | 原始字符串直接使用，不解析 |
 | `port_mapping` | 写死 | `{Port.PROXY: 8000, Port.SERVER: 8080, Port.SSH: 22}`，与 K8s 一致 |
 | `auth_token` | `access.agent_token` | Rocklet 认证 token |
-| `extended_params[remote_sandbox_id]` | 响应 `sandbox_id` | 平台分配的沙箱 ID |
+| `host_name` | 响应 `sandbox_id` | 平台分配的沙箱 ID（remote sandbox id） |
 | `extended_params[endpoint_template]` | `access.endpoint_template` | 原始值，供后续使用 |
 | `extended_params[backend]` | 固定 `"sandbox_next"` | 后端标识 |
 
@@ -166,21 +162,6 @@ Provider 在 `submit()` 返回的 `SandboxInfo` 中填充：
 #### 重试策略
 
 对 5xx 错误进行指数退避重试（默认最多 3 次，退避基数 0.5s），4xx 错误直接返回。通过 `provider_options.retry_max` 和 `provider_options.retry_backoff_base` 可配置。
-
-#### TemplateSpec 字段映射
-
-| TemplateSpec 字段 | NewTemplate 字段 | 说明 |
-|-------------------|-----------------|------|
-| `from_image` | `from_image` | 直接映射 |
-| `cpu_count` | `resources.vcpu` | 转入 Resources 对象 |
-| `memory_mb` | `resources.memory_mb` | 直接映射 |
-| `disk_gb` | `resources.disk_mb` | GB → MB 转换 |
-| `num_gpus` / `accelerator_type` | — | SandboxNext 不支持 |
-| `os` | — | 由 `class` 决定 |
-
-`NewTemplate` 还需 `request_id`（幂等键）、`region`、`class`、`name`，由 provider 从 `RemoteOperatorConfig` 和 `TemplateSpec` 生成。
-
-> **注意**：SandboxNext Template 模型无 capacity/pool 概念，与 K8sOperator 的 Pool CRD 输出格式不同。
 
 ## 4. 配置设计
 
@@ -191,18 +172,13 @@ Provider 在 `submit()` 返回的 `SandboxInfo` 中填充：
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `provider` | `str` | `"sandbox_next"` | provider 类型 |
-| `endpoint` | `str` | (必填) | Gateway API 域名 |
+| `base_url` | `str` | (必填) | Gateway API 基础 URL，例如 `http://sandbox-gw.alibaba.net` |
 | `api_key` | `str \| None` | `None` | `X-Api-Key` 头认证 |
 | `access_token` | `str \| None` | `None` | Bearer token 认证 |
-| `protocol` | `str` | `"https"` | 连接协议 |
 | `default_timeout` | `int` | `600` | HTTP 请求超时（秒） |
-| `region` | `str` | `"cn-hangzhou"` | SandboxNext region |
-| `sandbox_class` | `str` | `"headless-vm"` | 沙箱形态 |
-| `namespace` | `str` | `"rock"` | 命名空间 |
-| `state_mapping` | `dict \| None` | `None` | 覆盖状态映射表 |
-| `provider_options` | `dict` | `{}` | provider 特有的额外配置 |
+| `provider_options` | `dict` | `{}` | provider 特有的额外配置，例如 `region`、`sandbox_class`、`state_mapping` |
 
-`endpoint` 为空时抛 `ValueError`。
+`base_url` 为空时抛 `ValueError`。
 
 ### 4.2 RockConfig 集成
 
@@ -216,13 +192,12 @@ runtime:
 
 remote:
   provider: "sandbox_next"
-  endpoint: "api.cn-hangzhou.sandbox.internal"
+  base_url: "http://sandbox-gw.alibaba.net"
   api_key: "your-x-api-key"
-  protocol: "https"
   default_timeout: 600
-  region: "cn-hangzhou"
-  sandbox_class: "headless-vm"
-  namespace: "rock"
+  provider_options:
+    region: "cn-wulanchabu"
+    sandbox_class: "gui"
 ```
 
 ## 5. 工厂集成
@@ -239,7 +214,7 @@ rock/sandbox/operator/remote/
 ├── __init__.py
 ├── operator.py                    # RemoteOperator
 ├── provider.py                    # RemoteProvider Protocol
-├── constants.py                   # EXT_REMOTE_ID, BACKEND_NAME 等常量
+├── constants.py                   # EXT_ENDPOINT, BACKEND_NAME 等常量
 └── providers/
     ├── __init__.py
     └── sandbox_next_provider.py   # SandboxNextProvider
@@ -255,7 +230,7 @@ tests/unit/sandbox/operator/remote/
 | 测试文件 | 覆盖范围 |
 |---------|---------|
 | `test_operator.py` | submit/get_status/stop/delete/restart、Redis 合并逻辑、provider 委托验证、`NotImplementedError` → `BadRequestRockError` 转换 |
-| `test_sandbox_next_provider.py` | HTTP 调用（`httpx.MockTransport`）、状态映射、错误处理、认证头、Template CRUD（含 409 幂等、404 处理、501 不支持） |
+| `test_sandbox_next_provider.py` | HTTP 调用（`httpx.MockTransport`）、状态映射、错误处理、认证头、Template API 暂不实现（`NotImplementedError`） |
 
 ## 8. 设计决策
 
@@ -265,7 +240,7 @@ tests/unit/sandbox/operator/remote/
 | 探活机制 | 与 K8s/Ray 一致，复用现有逻辑 | 统一运维 |
 | 重试策略 | 5xx 指数退避（最多 3 次），4xx 直接返回 | 有限重试，避免无限等待 |
 | 数据面连通 | `endpoint_template` 直接作为 `host_ip`，`port_mapping` 写死 | 复用现有 proxy 链路，与 K8s 一致 |
-| stop 语义 | 不支持 `pause_resume`（501）时降级为 `delete` | 保证 stop 语义可达 |
+| stop 语义 | `stop` 与 `delete` 同语义 | SandboxNext 无 pause/resume，简化实现 |
 | 租约管理 | 不设 `timeout_seconds`，使用平台默认值；不实现 renew | Rock 自身的 `auto_archive_seconds` / `auto_delete_seconds` 控制生命周期 |
 | Region / Class | 全局配置，所有沙箱使用同一值 | 简化 Phase 1 |
 
@@ -279,7 +254,7 @@ tests/unit/sandbox/operator/remote/
 | 支持 Scheduler | 是 | 是 | 否 | 否 |
 | supports_running_delete | False | False | True | True |
 | restart | 支持 | 不支持 | 不支持 | 不支持 |
-| Template API | 不支持 | 支持 (Pool CRD) | 不支持 | 支持 (HTTP REST，可选) |
+| Template API | 不支持 | 支持 (Pool CRD) | 不支持 | 不支持（暂不实现） |
 | Proxy 层 | Rocklet RPC | Rocklet RPC | OpenSandboxBackend | Rocklet RPC (复用) |
 
 ## 10. 后续扩展

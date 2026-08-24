@@ -65,13 +65,14 @@ class RemoteOperator(AbstractOperator):
         if provider_info is None:
             redis_info["state"] = "deleted"
             return redis_info
-        return {**provider_info, "sandbox_id": redis_info["sandbox_id"]}
+        redis_info.update(provider_info)
+        return redis_info
 
     async def stop(self, sandbox_id: str, reason: StopReason = StopReason.MANUAL) -> bool:
         remote_id = await self._resolve_remote_id(sandbox_id)
         if not remote_id:
             raise BadRequestRockError(f"cannot resolve remote_sandbox_id for sandbox {sandbox_id}")
-        logger.info("[%s] remote stop -> pause (reason=%s)", sandbox_id, reason.value)
+        logger.info("[%s] remote stop -> delete (reason=%s)", sandbox_id, reason.value)
         return await self._provider.stop(remote_id)
 
     async def delete(self, config: DockerDeploymentConfig, host_ip: str | None = None) -> bool:

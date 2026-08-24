@@ -83,7 +83,6 @@ class TestRemoteOperatorGetStatus:
         op = RemoteOperator(_make_config())
         op._provider = AsyncMock()
         op._provider.get_status = AsyncMock(return_value={
-            "sandbox_id": "sn-1",
             "host_name": "sn-1",
             "state": State.RUNNING,
             "host_ip": "host.example.com",
