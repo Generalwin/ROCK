@@ -73,6 +73,7 @@ async def create_sandbox(
     # never expires a sandbox earlier than the caller requested.
     config = DockerDeploymentConfig(
         image=request.template_id,
+        template_id=request.template_id,
         auto_clear_time_minutes=math.ceil(request.timeout / 60),
         container_name=request.metadata.get(AP_SANDBOX_ID_METADATA_KEY),
         metadata=request.metadata,

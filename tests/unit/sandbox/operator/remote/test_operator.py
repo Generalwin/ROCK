@@ -8,12 +8,12 @@ from rock.actions.sandbox.sandbox_info import SandboxInfo
 from rock.common.constants import StopReason
 from rock.config import RemoteOperatorConfig
 from rock.deployments.config import DockerDeploymentConfig
-from rock.sandbox.operator.remote.constants import EXT_REMOTE_ID, EXT_BACKEND, BACKEND_NAME
+from rock.sandbox.operator.remote.constants import EXT_BACKEND, BACKEND_NAME
 from rock.sandbox.operator.remote.operator import RemoteOperator
 
 
 def _make_config(**overrides) -> RemoteOperatorConfig:
-    defaults = {"endpoint": "api.sandbox.test", "api_key": "test-key"}
+    defaults = {"base_url": "https://api.sandbox.test", "api_key": "test-key"}
     defaults.update(overrides)
     return RemoteOperatorConfig(**defaults)
 
@@ -41,9 +41,9 @@ class TestRemoteOperatorInit:
         with pytest.raises(ValueError, match="Unsupported remote provider"):
             RemoteOperator(_make_config(provider="e2b"))
 
-    def test_missing_endpoint_raises(self):
-        with pytest.raises(ValueError, match="endpoint is required"):
-            RemoteOperatorConfig(endpoint="")
+    def test_missing_base_url_raises(self):
+        with pytest.raises(ValueError, match="base_url is required"):
+            RemoteOperatorConfig(base_url="")
 
 
 class TestRemoteOperatorSubmit:
@@ -79,33 +79,29 @@ class TestRemoteOperatorGetStatus:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_merge_redis_and_provider_info(self):
+    async def test_get_status_returns_provider_info_with_rock_sandbox_id(self):
         op = RemoteOperator(_make_config())
         op._provider = AsyncMock()
         op._provider.get_status = AsyncMock(return_value={
-            "sandbox_id": "sb-1",
+            "sandbox_id": "sn-1",
+            "host_name": "sn-1",
             "state": State.RUNNING,
             "host_ip": "host.example.com",
             "port_mapping": {22555: 443},
             "auth_token": "tok",
-            "extended_params": {EXT_REMOTE_ID: "sn-1", EXT_BACKEND: BACKEND_NAME},
+            "extended_params": {EXT_BACKEND: BACKEND_NAME},
         })
         op.get_sandbox_info_from_redis = AsyncMock(return_value={
             "sandbox_id": "sb-1",
-            "state": State.PENDING,
-            "user_id": "u1",
-            "image": "python:3.11",
-            "extended_params": {EXT_REMOTE_ID: "sn-1", "custom_key": "val"},
+            "host_name": "sn-1",
         })
         result = await op.get_status("sb-1")
         assert result is not None
         assert result["state"] == State.RUNNING
-        assert result["user_id"] == "u1"
         assert result["host_ip"] == "host.example.com"
-        ext = result["extended_params"]
-        assert ext[EXT_REMOTE_ID] == "sn-1"
-        assert ext["custom_key"] == "val"  # preserved from Redis
-        assert ext[EXT_BACKEND] == BACKEND_NAME  # from provider
+        assert result["sandbox_id"] == "sb-1"
+        assert result["host_name"] == "sn-1"
+        assert result["extended_params"][EXT_BACKEND] == BACKEND_NAME
 
     @pytest.mark.asyncio
     async def test_provider_404_marks_deleted(self):
@@ -114,8 +110,8 @@ class TestRemoteOperatorGetStatus:
         op._provider.get_status = AsyncMock(return_value=None)
         op.get_sandbox_info_from_redis = AsyncMock(return_value={
             "sandbox_id": "sb-1",
+            "host_name": "sn-1",
             "state": State.RUNNING,
-            "extended_params": {EXT_REMOTE_ID: "sn-1"},
         })
         result = await op.get_status("sb-1")
         assert result is not None
@@ -130,7 +126,7 @@ class TestRemoteOperatorStop:
         op._provider.stop = AsyncMock(return_value=True)
         op.get_sandbox_info_from_redis = AsyncMock(return_value={
             "sandbox_id": "sb-1",
-            "extended_params": {EXT_REMOTE_ID: "sn-1"},
+            "host_name": "sn-1",
         })
         result = await op.stop("sb-1", StopReason.MANUAL)
         assert result is True
@@ -146,24 +142,13 @@ class TestRemoteOperatorStop:
 
 class TestRemoteOperatorDelete:
     @pytest.mark.asyncio
-    async def test_delete_from_config_extended_params(self):
-        op = RemoteOperator(_make_config())
-        op._provider = AsyncMock()
-        op._provider.delete = AsyncMock(return_value=True)
-        docker_config = _make_docker_config()
-        docker_config.extended_params = {EXT_REMOTE_ID: "sn-1"}
-        result = await op.delete(docker_config)
-        assert result is True
-        op._provider.delete.assert_awaited_once_with("sn-1")
-
-    @pytest.mark.asyncio
-    async def test_delete_fallback_to_redis(self):
+    async def test_delete_resolves_from_redis(self):
         op = RemoteOperator(_make_config())
         op._provider = AsyncMock()
         op._provider.delete = AsyncMock(return_value=True)
         op.get_sandbox_info_from_redis = AsyncMock(return_value={
             "sandbox_id": "sb-1",
-            "extended_params": {EXT_REMOTE_ID: "sn-redis"},
+            "host_name": "sn-redis",
         })
         docker_config = _make_docker_config()
         result = await op.delete(docker_config)

@@ -455,8 +455,8 @@ class RemoteOperatorConfig:
     provider: str = "sandbox_next"
     """Provider type. Currently only "sandbox_next" is supported."""
 
-    endpoint: str = ""
-    """SandboxNext Gateway API domain."""
+    base_url: str = ""
+    """Remote platform API base URL (e.g. https://sandbox-gw.example.com)."""
 
     api_key: str | None = None
     """X-Api-Key header authentication."""
@@ -464,30 +464,16 @@ class RemoteOperatorConfig:
     access_token: str | None = None
     """Bearer token authentication."""
 
-    protocol: str = "https"
-    """Connection protocol: "http" or "https"."""
-
     default_timeout: int = 600
     """HTTP request timeout in seconds."""
 
-    region: str = "cn-hangzhou"
-    """SandboxNext region."""
-
-    sandbox_class: str = "headless-vm"
-    """SandboxNext class (sandbox form factor)."""
-
-    namespace: str = "rock"
-    """Namespace/label scope for sandboxes created by this Rock instance."""
-
-    state_mapping: dict | None = None
-    """Override the default SandboxNext state -> Rock State mapping."""
-
     provider_options: dict = field(default_factory=dict)
-    """Provider-specific extra configuration (e.g. retry settings)."""
+    """Provider-specific pass-through config. Each provider parses the keys it
+    needs (e.g. region, sandbox_class, state_mapping, retry settings)."""
 
     def __post_init__(self):
-        if not self.endpoint:
-            raise ValueError("RemoteOperatorConfig.endpoint is required")
+        if not self.base_url:
+            raise ValueError("RemoteOperatorConfig.base_url is required")
 
 
 @dataclass

@@ -17,7 +17,6 @@ from rock.config import RemoteOperatorConfig
 from rock.deployments.config import DockerDeploymentConfig
 from rock.logger import init_logger
 from rock.sandbox.operator.abstract import AbstractOperator
-from rock.sandbox.operator.remote.constants import EXT_REMOTE_ID
 from rock.sandbox.operator.remote.providers.sandbox_next_provider import SandboxNextProvider
 from rock.sdk.common.exceptions import BadRequestRockError
 
@@ -32,7 +31,7 @@ class RemoteOperator(AbstractOperator):
     def __init__(self, remote_config: RemoteOperatorConfig):
         self._config = remote_config
         self._provider = self._create_provider(remote_config)
-        logger.info("Initialized RemoteOperator (provider=%s, endpoint=%s)", remote_config.provider, remote_config.endpoint)
+        logger.info("Initialized RemoteOperator (provider=%s, base_url=%s)", remote_config.provider, remote_config.base_url)
 
     @staticmethod
     def _create_provider(config: RemoteOperatorConfig):
@@ -42,11 +41,11 @@ class RemoteOperator(AbstractOperator):
         raise ValueError(f"Unsupported remote provider: {config.provider}. Supported: sandbox_next")
 
     async def _resolve_remote_id(self, sandbox_id: str) -> str | None:
-        """Read the platform-assigned ID from Redis extended_params."""
+        """Read the platform-assigned ID from Redis sandbox_info."""
         info = await self.get_sandbox_info_from_redis(sandbox_id)
         if not info:
             return None
-        return (info.get("extended_params") or {}).get(EXT_REMOTE_ID)
+        return info.get("host_name")
 
     async def submit(self, config: DockerDeploymentConfig, user_info: dict = {}) -> SandboxInfo:
         return await self._provider.submit(config, user_info)
@@ -58,23 +57,15 @@ class RemoteOperator(AbstractOperator):
         redis_info = await self.get_sandbox_info_from_redis(sandbox_id)
         if not redis_info:
             return None
-        remote_id = (redis_info.get("extended_params") or {}).get(EXT_REMOTE_ID)
+        remote_id = redis_info.get("host_name")
         if not remote_id:
-            logger.warning("[%s] no remote_sandbox_id in cached info", sandbox_id)
+            logger.warning("[%s] no host_name (remote id) in cached info", sandbox_id)
             return None
         provider_info = await self._provider.get_status(remote_id)
         if provider_info is None:
-            # Sandbox no longer exists on the remote platform
             redis_info["state"] = "deleted"
             return redis_info
-        # Merge: provider real-time status overrides Redis base fields;
-        # Redis user metadata is preserved (deep merge extended_params).
-        merged = dict(redis_info)
-        merged.update(provider_info)
-        merged_extended = dict(redis_info.get("extended_params") or {})
-        merged_extended.update(provider_info.get("extended_params") or {})
-        merged["extended_params"] = merged_extended
-        return merged
+        return {**provider_info, "sandbox_id": redis_info["sandbox_id"]}
 
     async def stop(self, sandbox_id: str, reason: StopReason = StopReason.MANUAL) -> bool:
         remote_id = await self._resolve_remote_id(sandbox_id)
@@ -85,7 +76,7 @@ class RemoteOperator(AbstractOperator):
 
     async def delete(self, config: DockerDeploymentConfig, host_ip: str | None = None) -> bool:
         sandbox_id = config.container_name
-        remote_id = (config.extended_params or {}).get(EXT_REMOTE_ID) or await self._resolve_remote_id(sandbox_id)
+        remote_id = await self._resolve_remote_id(sandbox_id)
         if not remote_id:
             raise BadRequestRockError(f"cannot resolve remote_sandbox_id for sandbox {sandbox_id}")
         logger.info("[%s] remote delete", sandbox_id)

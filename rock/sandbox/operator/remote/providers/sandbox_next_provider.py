@@ -10,13 +10,14 @@ from typing import Any
 
 import httpx
 
+
 from rock.actions.sandbox.response import State
 from rock.actions.sandbox.sandbox_info import SandboxInfo
 from rock.config import RemoteOperatorConfig
 from rock.deployments.config import DockerDeploymentConfig
 from rock.deployments.constants import Port
 from rock.logger import init_logger
-from rock.sandbox.operator.remote.constants import EXT_BACKEND, EXT_ENDPOINT, EXT_REMOTE_ID, BACKEND_NAME
+from rock.sandbox.operator.remote.constants import EXT_BACKEND, EXT_ENDPOINT, BACKEND_NAME
 
 logger = init_logger(__name__)
 
@@ -61,11 +62,14 @@ class SandboxNextProvider:
 
     def __init__(self, config: RemoteOperatorConfig, *, client: httpx.AsyncClient | None = None):
         self._config = config
-        self._state_map = config.state_mapping or _DEFAULT_STATE_MAP
-        self._retry_max = config.provider_options.get("retry_max", 3)
-        self._retry_backoff = config.provider_options.get("retry_backoff_base", 0.5)
+        opts = config.provider_options
+        self._state_map = opts.get("state_mapping") or _DEFAULT_STATE_MAP
+        self._retry_max = opts.get("retry_max", 3)
+        self._retry_backoff = opts.get("retry_backoff_base", 0.5)
+        self._region = opts.get("region", "cn-hangzhou")
+        self._sandbox_class = opts.get("sandbox_class", "headless-vm")
 
-        base_url = f"{config.protocol}://{config.endpoint}"
+        base_url = config.base_url
         headers: dict[str, str] = {}
         if config.api_key:
             headers["X-Api-Key"] = config.api_key
@@ -77,7 +81,7 @@ class SandboxNextProvider:
             headers=headers,
             timeout=config.default_timeout,
         )
-        logger.info("Initialized SandboxNextProvider (endpoint=%s, region=%s)", config.endpoint, config.region)
+        logger.info("Initialized SandboxNextProvider (base_url=%s, region=%s)", config.base_url, self._region)
 
     # --- HTTP helpers ---
 
@@ -103,8 +107,8 @@ class SandboxNextProvider:
 
         body: dict[str, Any] = {
             "request_id": sandbox_id,
-            "region": self._config.region,
-            "class": self._config.sandbox_class,
+            "region": self._region,
+            "class": self._sandbox_class,
             "resources": {
                 "vcpu": int(config.cpus),
                 "memory_mb": _parse_mem_to_mb(config.memory),
@@ -117,6 +121,8 @@ class SandboxNextProvider:
                 "namespace": namespace,
             },
         }
+        if config.template_id:
+            body["template_id"] = config.template_id
         if config.env_vars:
             body["env_vars"] = config.env_vars
 
@@ -134,6 +140,7 @@ class SandboxNextProvider:
 
         info: SandboxInfo = {
             "sandbox_id": sandbox_id,
+            "host_name": sn_id,
             "image": config.image,
             "cpus": config.cpus,
             "memory": config.memory,
@@ -150,7 +157,6 @@ class SandboxNextProvider:
             "auth_token": agent_token,
             "extended_params": {
                 EXT_BACKEND: BACKEND_NAME,
-                EXT_REMOTE_ID: sn_id,
                 EXT_ENDPOINT: endpoint_template,
             },
         }
@@ -170,6 +176,7 @@ class SandboxNextProvider:
 
         info: SandboxInfo = {
             "sandbox_id": remote_sandbox_id,
+            "host_name": remote_sandbox_id,
             "state": _map_state(sn_state, self._state_map),
             "host_ip": endpoint_template,
             "port_mapping": {
@@ -180,20 +187,14 @@ class SandboxNextProvider:
             "auth_token": agent_token,
             "extended_params": {
                 EXT_BACKEND: BACKEND_NAME,
-                EXT_REMOTE_ID: remote_sandbox_id,
                 EXT_ENDPOINT: endpoint_template,
             },
         }
         return info
 
     async def stop(self, remote_sandbox_id: str) -> bool:
-        """Pause the sandbox. Falls back to delete if pause is unsupported (501)."""
-        response = await self._request("POST", f"/v1/sandboxes/{remote_sandbox_id}/pause")
-        if response.status_code == 501:
-            logger.info("[%s] pause not supported (501), falling back to delete", remote_sandbox_id)
-            return await self.delete(remote_sandbox_id)
-        response.raise_for_status()
-        return True
+        """Stop the sandbox by deleting it."""
+        return await self.delete(remote_sandbox_id)
 
     async def delete(self, remote_sandbox_id: str) -> bool:
         response = await self._request("DELETE", f"/v1/sandboxes/{remote_sandbox_id}")
@@ -202,86 +203,13 @@ class SandboxNextProvider:
         response.raise_for_status()
         return True
 
-    # --- Template API ---
+    # --- Template API (not implemented for SandboxNext yet) ---
 
     async def create_template(self, spec: Any) -> dict:
-        body = self._template_spec_to_new(spec)
-        response = await self._request("POST", "/v1/templates", json=body)
-        if response.status_code == 409:
-            # Idempotent: fetch existing by request_id
-            request_id = body.get("request_id", "")
-            if request_id:
-                get_resp = await self._request("GET", f"/v1/templates/{request_id}")
-                if get_resp.status_code == 200:
-                    return self._template_to_dict(get_resp.json())
-            response.raise_for_status()
-        if response.status_code == 501:
-            raise NotImplementedError("template_create not supported on this class")
-        response.raise_for_status()
-        return self._template_to_dict(response.json())
+        raise NotImplementedError("template API is not supported by SandboxNextProvider yet")
 
     async def get_template_status(self, template_id: str) -> dict | None:
-        response = await self._request("GET", f"/v1/templates/{template_id}")
-        if response.status_code == 404:
-            return None
-        response.raise_for_status()
-        return self._template_to_dict(response.json())
+        raise NotImplementedError("template API is not supported by SandboxNextProvider yet")
 
     async def delete_template(self, template_id: str) -> bool:
-        response = await self._request("DELETE", f"/v1/templates/{template_id}")
-        if response.status_code == 404:
-            return True
-        if response.status_code == 501:
-            raise NotImplementedError("template_create not supported on this class")
-        response.raise_for_status()
-        return True
-
-    # --- Template mapping helpers ---
-
-    def _template_spec_to_new(self, spec: Any) -> dict:
-        """Convert a Rock TemplateSpec-like object to SandboxNext NewTemplate."""
-        # Accept both dict and dataclass/pydantic model
-        if hasattr(spec, "model_dump"):
-            spec = spec.model_dump()
-        elif hasattr(spec, "__dict__"):
-            spec = {k: v for k, v in vars(spec).items() if not k.startswith("_")}
-        elif not isinstance(spec, dict):
-            spec = dict(spec)
-
-        body: dict[str, Any] = {
-            "request_id": spec.get("template_id") or spec.get("request_id", ""),
-            "region": spec.get("region", self._config.region),
-            "class": spec.get("sandbox_class") or spec.get("class") or self._config.sandbox_class,
-            "name": spec.get("name", "default"),
-        }
-        resources = spec.get("resources")
-        if resources:
-            body["resources"] = resources
-        else:
-            cpus = spec.get("cpus")
-            memory = spec.get("memory")
-            disk = spec.get("disk")
-            res: dict[str, int] = {}
-            if cpus is not None:
-                res["vcpu"] = int(cpus)
-            if memory is not None:
-                res["memory_mb"] = _parse_mem_to_mb(memory)
-            if disk is not None:
-                res["disk_mb"] = _parse_disk_to_mb(disk)
-            if res:
-                body["resources"] = res
-        if spec.get("image"):
-            body["from_image"] = spec["image"]
-        if spec.get("env_vars"):
-            body["env_vars"] = spec["env_vars"]
-        return body
-
-    def _template_to_dict(self, data: dict) -> dict:
-        """Convert SandboxNext Template response to Rock template status dict."""
-        return {
-            "template_id": data.get("template_id", ""),
-            "name": data.get("name", ""),
-            "status": data.get("status", "pending"),
-            "resources": data.get("resources", {}),
-            "failure": data.get("failure"),
-        }
+        raise NotImplementedError("template API is not supported by SandboxNextProvider yet")

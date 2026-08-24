@@ -6,7 +6,7 @@ import httpx
 from rock.actions.sandbox.response import State
 from rock.config import RemoteOperatorConfig
 from rock.deployments.config import DockerDeploymentConfig
-from rock.sandbox.operator.remote.constants import EXT_REMOTE_ID, EXT_ENDPOINT, EXT_BACKEND, BACKEND_NAME
+from rock.sandbox.operator.remote.constants import EXT_ENDPOINT, EXT_BACKEND, BACKEND_NAME
 from rock.sandbox.operator.remote.providers.sandbox_next_provider import (
     SandboxNextProvider,
     _map_state,
@@ -18,7 +18,7 @@ from rock.sandbox.operator.remote.providers.sandbox_next_provider import (
 # --- Config / fixture helpers ---
 
 def _make_config(**overrides) -> RemoteOperatorConfig:
-    defaults = {"endpoint": "api.sandbox.test", "api_key": "test-key"}
+    defaults = {"base_url": "https://api.sandbox.test", "api_key": "test-key"}
     defaults.update(overrides)
     return RemoteOperatorConfig(**defaults)
 
@@ -106,7 +106,7 @@ class TestSandboxNextProviderSubmit:
                     "class": "headless-vm",
                     "state": "creating",
                     "access": {
-                        "endpoint_template": "https://{port}-s485cf4a26daa06baf87e7636e63ca8873f.cn-hangzhou.sandbox.example.com",
+                        "endpoint_template": "10.0.0.1",
                         "agent_token": "agent-token-xyz",
                     },
                 },
@@ -122,10 +122,10 @@ class TestSandboxNextProviderSubmit:
         assert info["sandbox_id"] == "sb-test-001"
         assert info["state"] == State.PENDING
         assert info["auth_token"] == "agent-token-xyz"
-        assert info["host_ip"] == "https://{port}-s485cf4a26daa06baf87e7636e63ca8873f.cn-hangzhou.sandbox.example.com"
+        assert info["host_ip"] == "10.0.0.1"
         assert info["port_mapping"] == {22555: 8000, 8080: 8080, 22: 22}
         ext = info["extended_params"]
-        assert ext[EXT_REMOTE_ID] == "sn-abc123"
+        assert info["host_name"] == "sn-abc123"
         assert ext[EXT_BACKEND] == BACKEND_NAME
         assert EXT_ENDPOINT in ext
 
@@ -139,7 +139,7 @@ class TestSandboxNextProviderSubmit:
             return httpx.Response(202, json={
                 "sandbox_id": "sn-2",
                 "state": "creating",
-                "access": {"endpoint_template": "http://{port}-x.test", "agent_token": ""},
+                "access": {"endpoint_template": "10.0.0.2", "agent_token": ""},
             })
 
         config = _make_config()
@@ -147,7 +147,92 @@ class TestSandboxNextProviderSubmit:
         provider = SandboxNextProvider(config, client=client)
         docker_config = _make_docker_config(env_vars={"FOO": "bar"})
         info = await provider.submit(docker_config, {})
-        assert info["extended_params"][EXT_REMOTE_ID] == "sn-2"
+        assert info["host_name"] == "sn-2"
+
+    @pytest.mark.asyncio
+    async def test_submit_with_template_id(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            payload = json.loads(request.content)
+            assert payload["template_id"] == "pool-default"
+            return httpx.Response(201, json={
+                "sandbox_id": "sn-3",
+                "state": "running",
+                "access": {"endpoint_template": "10.0.0.1", "agent_token": "tok"},
+            })
+
+        config = _make_config()
+        client = _make_client(handler)
+        provider = SandboxNextProvider(config, client=client)
+        docker_config = _make_docker_config(template_id="pool-default")
+        info = await provider.submit(docker_config, {})
+        assert info["host_name"] == "sn-3"
+
+    @pytest.mark.asyncio
+    async def test_submit_without_template_id_omits_field(self):
+        seen = {"body": None}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(201, json={
+                "sandbox_id": "sn-4",
+                "state": "running",
+                "access": {"endpoint_template": "10.0.0.2", "agent_token": ""},
+            })
+
+        config = _make_config()
+        client = _make_client(handler)
+        provider = SandboxNextProvider(config, client=client)
+        docker_config = _make_docker_config()
+        await provider.submit(docker_config, {})
+        assert "template_id" not in seen["body"]
+
+    @pytest.mark.asyncio
+    async def test_submit_uses_provider_options_for_region_and_class(self):
+        seen = {"body": None}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(201, json={
+                "sandbox_id": "sn-5",
+                "state": "running",
+                "access": {"endpoint_template": "10.0.0.3", "agent_token": ""},
+            })
+
+        config = _make_config(provider_options={"region": "cn-wulanchabu", "sandbox_class": "gui"})
+        client = _make_client(handler)
+        provider = SandboxNextProvider(config, client=client)
+        docker_config = _make_docker_config()
+        await provider.submit(docker_config, {})
+        assert seen["body"]["region"] == "cn-wulanchabu"
+        assert seen["body"]["class"] == "gui"
+
+    @pytest.mark.asyncio
+    async def test_submit_uses_defaults_without_provider_options(self):
+        seen = {"body": None}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(201, json={
+                "sandbox_id": "sn-6",
+                "state": "running",
+                "access": {"endpoint_template": "10.0.0.4", "agent_token": ""},
+            })
+
+        config = _make_config()  # no provider_options
+        client = _make_client(handler)
+        provider = SandboxNextProvider(config, client=client)
+        docker_config = _make_docker_config()
+        await provider.submit(docker_config, {})
+        assert seen["body"]["region"] == "cn-hangzhou"
+        assert seen["body"]["class"] == "headless-vm"
 
 
 class TestSandboxNextProviderGetStatus:
@@ -157,7 +242,7 @@ class TestSandboxNextProviderGetStatus:
             return httpx.Response(200, json={
                 "sandbox_id": "sn-1",
                 "state": "running",
-                "access": {"endpoint_template": "https://{port}-x.test", "agent_token": "tok"},
+                "access": {"endpoint_template": "10.0.0.5", "agent_token": "tok"},
             })
 
         provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
@@ -178,31 +263,14 @@ class TestSandboxNextProviderGetStatus:
 
 class TestSandboxNextProviderStop:
     @pytest.mark.asyncio
-    async def test_pause_success(self):
+    async def test_stop_delegates_to_delete(self):
         def handler(request: httpx.Request) -> httpx.Response:
-            assert "/pause" in str(request.url)
-            return httpx.Response(202, json={"state": "pausing"})
+            assert request.method == "DELETE"
+            return httpx.Response(202)
 
         provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
         result = await provider.stop("sn-1")
         assert result is True
-
-    @pytest.mark.asyncio
-    async def test_pause_501_fallback_to_delete(self):
-        call_count = {"delete": 0}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if "/pause" in str(request.url):
-                return httpx.Response(501, json={"error": "not implemented"})
-            if request.method == "DELETE":
-                call_count["delete"] += 1
-                return httpx.Response(202)
-            return httpx.Response(500)
-
-        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
-        result = await provider.stop("sn-1")
-        assert result is True
-        assert call_count["delete"] == 1
 
 
 class TestSandboxNextProviderDelete:
@@ -223,62 +291,23 @@ class TestSandboxNextProviderDelete:
         assert await provider.delete("sn-gone") is True
 
 
-# --- Template API tests ---
+# --- Template API tests (currently unsupported) ---
 
 class TestSandboxNextProviderTemplate:
     @pytest.mark.asyncio
-    async def test_create_template_success(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(202, json={
-                "template_id": "tpl-1",
-                "name": "py311",
-                "status": "pending",
-                "resources": {"vcpu": 2, "memory_mb": 8192},
-            })
-
-        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
-        result = await provider.create_template({"template_id": "tpl-1", "name": "py311", "cpus": 2, "memory": "8g"})
-        assert result["template_id"] == "tpl-1"
-        assert result["status"] == "pending"
-
-    @pytest.mark.asyncio
-    async def test_create_template_409_idempotent(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.method == "POST":
-                return httpx.Response(409, json={"error": "conflict"})
-            # GET fallback
-            return httpx.Response(200, json={
-                "template_id": "tpl-1",
-                "name": "py311",
-                "status": "ready",
-            })
-
-        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
-        result = await provider.create_template({"template_id": "tpl-1", "name": "py311"})
-        assert result["template_id"] == "tpl-1"
-        assert result["status"] == "ready"
-
-    @pytest.mark.asyncio
-    async def test_get_template_status_404(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404)
-
-        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
-        assert await provider.get_template_status("tpl-gone") is None
-
-    @pytest.mark.asyncio
-    async def test_delete_template_404(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404)
-
-        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
-        assert await provider.delete_template("tpl-gone") is True
-
-    @pytest.mark.asyncio
-    async def test_create_template_501_not_implemented(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(501, json={"error": "not implemented"})
-
-        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
+    async def test_create_template_not_implemented(self):
+        provider = SandboxNextProvider(_make_config(), client=_make_client(lambda r: httpx.Response(200)))
         with pytest.raises(NotImplementedError):
-            await provider.create_template({"template_id": "tpl-1", "name": "test"})
+            await provider.create_template({"template_id": "tpl-1"})
+
+    @pytest.mark.asyncio
+    async def test_get_template_status_not_implemented(self):
+        provider = SandboxNextProvider(_make_config(), client=_make_client(lambda r: httpx.Response(200)))
+        with pytest.raises(NotImplementedError):
+            await provider.get_template_status("tpl-1")
+
+    @pytest.mark.asyncio
+    async def test_delete_template_not_implemented(self):
+        provider = SandboxNextProvider(_make_config(), client=_make_client(lambda r: httpx.Response(200)))
+        with pytest.raises(NotImplementedError):
+            await provider.delete_template("tpl-1")
