@@ -468,7 +468,7 @@ class RemoteOperatorConfig:
     """HTTP request timeout in seconds."""
 
     provider_options: dict = field(default_factory=dict)
-    """Provider-specific pass-through config, e.g. ``profile_id`` for SandboxNext."""
+    """Provider-specific pass-through config."""
 
     def __post_init__(self):
         if not self.base_url:

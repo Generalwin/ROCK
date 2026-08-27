@@ -1,9 +1,8 @@
 """SandboxNext provider — talks to the SandboxManager Control HTTP API.
 
-Implements the RemoteProvider Protocol using httpx.AsyncClient.
-See docs/proposals/sandbox-next.yaml for the OpenAPI spec. The owning profile is
-passed via the ``X-Sandbox-Profile-ID`` header on every request; region and
-class concepts live in headers too, not in request bodies.
+Implements the RemoteProvider Protocol using httpx.AsyncClient. Auth is the
+``X-Api-Key`` header — the gateway resolves the owning profile from the key
+and forwards it internally. ``X-Sandbox-Class`` routes to a cell.
 """
 
 from __future__ import annotations
@@ -45,13 +44,19 @@ _DEFAULT_STATE_MAP: dict[str, State] = {
 }
 
 # Control HTTP API headers
-PROFILE_ID_HEADER = "X-Sandbox-Profile-ID"
+API_KEY_HEADER = "X-Api-Key"
 CLASS_HEADER = "X-Sandbox-Class"
 
 
 def _map_state(sn_state: str | None, state_map: dict[str, State] | None = None) -> State:
     table = state_map or _DEFAULT_STATE_MAP
     return table.get(sn_state or "", State.PENDING)
+
+
+def _derive_sandbox_class(config: DockerDeploymentConfig) -> str:
+    """Derive X-Sandbox-Class from the deployment config."""
+    # TODO: derive gpu/gui/headless from num_gpus and image_os.
+    return "gui"
 
 
 class SandboxNextProvider:
@@ -63,17 +68,11 @@ class SandboxNextProvider:
         self._state_map = opts.get("state_mapping") or _DEFAULT_STATE_MAP
         self._retry_max = opts.get("retry_max", 3)
         self._retry_backoff = opts.get("retry_backoff_base", 0.5)
-        self._profile_id = opts.get("profile_id", "")
-        self._sandbox_class = opts.get("sandbox_class", "")
-        if not self._profile_id:
-            raise ValueError("provider_options.profile_id is required (X-Sandbox-Profile-ID header)")
+        if not config.api_key:
+            raise ValueError("RemoteOperatorConfig.api_key is required (X-Api-Key header)")
 
         base_url = config.base_url
-        headers: dict[str, str] = {PROFILE_ID_HEADER: self._profile_id}
-        if self._sandbox_class:
-            headers[CLASS_HEADER] = self._sandbox_class
-        if config.api_key:
-            headers["X-Api-Key"] = config.api_key
+        headers: dict[str, str] = {API_KEY_HEADER: config.api_key}
         if config.access_token:
             headers["Authorization"] = f"Bearer {config.access_token}"
 
@@ -83,12 +82,7 @@ class SandboxNextProvider:
         )
         # Auth / routing headers are provider-level; apply even to an injected client.
         self._client.headers.update(headers)
-        logger.info(
-            "Initialized SandboxNextProvider (base_url=%s, profile_id=%s, class=%s)",
-            config.base_url,
-            self._profile_id,
-            self._sandbox_class,
-        )
+        logger.info("Initialized SandboxNextProvider (base_url=%s)", config.base_url)
 
     # --- HTTP helpers ---
 
@@ -129,7 +123,13 @@ class SandboxNextProvider:
         if config.env_vars:
             body["env_vars"] = config.env_vars
 
-        response = await self._request("POST", "/v1/sandboxes", json=body)
+        sandbox_class = _derive_sandbox_class(config)
+        response = await self._request(
+            "POST",
+            "/v1/sandboxes",
+            json=body,
+            headers={CLASS_HEADER: sandbox_class},
+        )
         response.raise_for_status()
         data = response.json()
 
@@ -137,7 +137,7 @@ class SandboxNextProvider:
         sn_state = data.get("state")
         endpoint = data.get("endpoint") or ""
 
-        logger.info("[%s] sandbox_next submitted, remote_id=%s, state=%s", sandbox_id, sn_id, sn_state)
+        logger.info("[%s] sandbox_next submitted, remote_id=%s, state=%s, class=%s", sandbox_id, sn_id, sn_state, sandbox_class)
 
         info: SandboxInfo = {
             "sandbox_id": sandbox_id,

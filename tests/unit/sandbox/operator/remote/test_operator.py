@@ -15,7 +15,6 @@ def _make_config(**overrides) -> RemoteOperatorConfig:
     defaults = {
         "base_url": "https://api.sandbox.test",
         "api_key": "test-key",
-        "provider_options": {"profile_id": "test-profile"},
     }
     defaults.update(overrides)
     return RemoteOperatorConfig(**defaults)

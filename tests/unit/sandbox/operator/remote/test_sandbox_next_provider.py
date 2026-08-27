@@ -9,6 +9,7 @@ from rock.deployments.config import DockerDeploymentConfig
 from rock.sandbox.operator.remote.constants import EXT_ENDPOINT, EXT_BACKEND, BACKEND_NAME
 from rock.sandbox.operator.remote.providers.sandbox_next_provider import (
     SandboxNextProvider,
+    _derive_sandbox_class,
     _map_state,
 )
 
@@ -19,7 +20,6 @@ def _make_config(**overrides) -> RemoteOperatorConfig:
     defaults = {
         "base_url": "https://api.sandbox.test",
         "api_key": "test-key",
-        "provider_options": {"profile_id": "test-profile"},
     }
     defaults.update(overrides)
     return RemoteOperatorConfig(**defaults)
@@ -81,24 +81,28 @@ class TestMapState:
 
 # --- Provider init tests ---
 
-class TestSandboxNextProviderInit:
-    def test_missing_profile_id_raises(self):
-        with pytest.raises(ValueError, match="profile_id is required"):
-            SandboxNextProvider(_make_config(provider_options={}))
+class TestDeriveSandboxClass:
+    def test_defaults_to_gui(self):
+        assert _derive_sandbox_class(_make_docker_config()) == "gui"
 
-    def test_profile_id_sent_as_header(self):
+
+class TestSandboxNextProviderInit:
+    def test_missing_api_key_raises(self):
+        with pytest.raises(ValueError, match="api_key is required"):
+            SandboxNextProvider(_make_config(api_key=None))
+
+    def test_auth_header_set_on_client(self):
         seen = {"headers": None}
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["headers"] = request.headers
             return httpx.Response(200, json={"sandbox_id": "sn-1", "state": "SANDBOX_RUNNING"})
 
-        config = _make_config(provider_options={"profile_id": "prof-1", "sandbox_class": "gui"})
-        provider = SandboxNextProvider(config, client=_make_client(handler))
+        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
         provider._client.headers  # headers set at client construction
-        assert provider._client.headers["X-Sandbox-Profile-ID"] == "prof-1"
-        assert provider._client.headers["X-Sandbox-Class"] == "gui"
         assert provider._client.headers["X-Api-Key"] == "test-key"
+        assert "X-Sandbox-Class" not in provider._client.headers
+        assert "X-Sandbox-Profile-ID" not in provider._client.headers
 
 
 # --- Provider lifecycle tests ---
@@ -109,7 +113,8 @@ class TestSandboxNextProviderSubmit:
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.method == "POST"
             assert "/v1/sandboxes" in str(request.url)
-            assert request.headers["X-Sandbox-Profile-ID"] == "test-profile"
+            assert request.headers["X-Api-Key"] == "test-key"
+            assert request.headers["X-Sandbox-Class"] == "gui"
             return httpx.Response(
                 201,
                 json={
@@ -211,7 +216,7 @@ class TestSandboxNextProviderSubmit:
             seen["body"] = json.loads(request.content)
             return httpx.Response(201, json={"sandbox_id": "sn-5", "state": "SANDBOX_RUNNING"})
 
-        config = _make_config(provider_options={"profile_id": "prof-1", "sandbox_class": "gui"})
+        config = _make_config()
         client = _make_client(handler)
         provider = SandboxNextProvider(config, client=client)
         await provider.submit(_make_docker_config(), {})

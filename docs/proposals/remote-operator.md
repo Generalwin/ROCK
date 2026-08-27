@@ -101,7 +101,7 @@ Template 方法默认 raise `NotImplementedError`，RemoteOperator 捕获后转�
 
 定义文件：`rock/sandbox/operator/remote/providers/sandbox_next_provider.py`
 
-使用 `httpx.AsyncClient` 与 SandboxManager Control HTTP API 通信（完整 OpenAPI 规范见 `docs/proposals/sandbox-next.yaml`）。认证支持 `X-Api-Key` 头和 Bearer token；租户路由通过 `X-Sandbox-Profile-ID` 头（必填，来自 `provider_options.profile_id`），沙箱形态通过 `X-Sandbox-Class` 头（可选）。profile_id 和资源 ID 不得出现在请求体中。
+使用 `httpx.AsyncClient` 与 SandboxManager Control HTTP API 通信。认证通过 `X-Api-Key` 头（必填，`api_key`）——网关侧由 API key 解析出租户 profile（`X-Sandbox-Profile-ID` 是网关到 SandboxManager 的内部 header，客户端无需也不应携带）；沙箱形态通过 `X-Sandbox-Class` 头携带，在 `submit` 时由 `_derive_sandbox_class()` 从 `DockerDeploymentConfig` 推导（当前固定返回 `gui`，后续按 num_gpus/image_os 细化 gpu/gui/headless）。profile_id 和资源 ID 不得出现在请求体中。
 
 #### API 端点摘要
 
@@ -185,10 +185,10 @@ Provider 在 `submit()` 返回的 `SandboxInfo` 中填充：
 |------|------|--------|------|
 | `provider` | `str` | `"sandbox_next"` | provider 类型 |
 | `base_url` | `str` | (必填) | SandboxManager API 基础 URL，例如 `http://sandbox-manager:8081` |
-| `api_key` | `str \| None` | `None` | `X-Api-Key` 头认证 |
-| `access_token` | `str \| None` | `None` | Bearer token 认证 |
+| `api_key` | `str \| None` | `None` | `X-Api-Key` 头认证（必填，网关由它解析租户 profile） |
+| `access_token` | `str \| None` | `None` | Bearer token 认证（可选） |
 | `default_timeout` | `int` | `600` | HTTP 请求超时（秒） |
-| `provider_options` | `dict` | `{}` | provider 特有的额外配置，例如 `profile_id`（必填）、`sandbox_class`、`state_mapping` |
+| `provider_options` | `dict` | `{}` | provider 特有的额外配置，例如 `state_mapping` |
 
 `base_url` 为空时抛 `ValueError`。
 
@@ -207,9 +207,6 @@ remote:
   base_url: "http://sandbox-manager:8081"
   api_key: "your-x-api-key"
   default_timeout: 600
-  provider_options:
-    profile_id: "rock-tenant"
-    sandbox_class: "gui"
 ```
 
 ## 5. 工厂集成
@@ -254,7 +251,7 @@ tests/unit/sandbox/operator/remote/
 | 数据面连通 | `endpoint` 直接作为 `host_ip`，`port_mapping` 写死 | 复用现有 proxy 链路，与 K8s 一致（endpoint 为 pod IP，端口固定） |
 | stop 语义 | `stop` 与 `delete` 同语义 | Rock 不使用 pause/resume 语义，简化实现 |
 | 租约管理 | 不设 `timeout_seconds`，使用平台默认值；不实现 renew | Rock 自身的 `auto_archive_seconds` / `auto_delete_seconds` 控制生命周期 |
-| Profile / Class | 全局配置（`provider_options.profile_id` / `sandbox_class`），以 header 携带，不进请求体 | Control HTTP API 约定：profile_id 与资源 ID 不得在 body 中重复 |
+| 认证 / 租户路由 | 客户端携带 `X-Api-Key`（必填）；`X-Sandbox-Class` 在 submit 时从 `DockerDeploymentConfig` 推导；profile 由网关从 API key 解析后内部下发，不进请求体也不由客户端携带 | 网关侧维护 API key → profile 映射；`X-Sandbox-Profile-ID` 为网关内部 header |
 
 ## 9. 与现有 Operator 对比
 
