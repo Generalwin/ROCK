@@ -10,8 +10,6 @@ from rock.sandbox.operator.remote.constants import EXT_ENDPOINT, EXT_BACKEND, BA
 from rock.sandbox.operator.remote.providers.sandbox_next_provider import (
     SandboxNextProvider,
     _map_state,
-    _parse_mem_to_mb,
-    _parse_disk_to_mb,
 )
 
 
@@ -48,31 +46,6 @@ def _make_client(handler) -> httpx.AsyncClient:
 
 
 # --- Utility tests ---
-
-class TestParseMemToMb:
-    def test_gigabytes(self):
-        assert _parse_mem_to_mb("8g") == 8192
-
-    def test_megabytes(self):
-        assert _parse_mem_to_mb("4096m") == 4096
-
-    def test_plain_number(self):
-        assert _parse_mem_to_mb("2048") == 2048
-
-    def test_empty(self):
-        assert _parse_mem_to_mb("") == 0
-
-    def test_uppercase(self):
-        assert _parse_mem_to_mb("4G") == 4096
-
-
-class TestParseDiskToMb:
-    def test_gigabytes(self):
-        assert _parse_disk_to_mb("50G") == 51200
-
-    def test_none(self):
-        assert _parse_disk_to_mb(None) == 0
-
 
 class TestMapState:
     def test_creating(self):

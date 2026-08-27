@@ -31,6 +31,16 @@ def parse_size_to_bytes(size_str: str) -> int:
     return int(number * units[unit])
 
 
+def parse_size_to_mb(size_str: str | None) -> int:
+    """Convert a size string (``8g``/``4096m``) to MB; a bare number is MB, empty returns 0."""
+    if not size_str:
+        return 0
+    s = size_str.strip().lower()
+    if re.match(r"^\d+(?:\.\d+)?$", s):
+        return int(float(s))
+    return parse_size_to_bytes(s) // (1024**2)
+
+
 def megabytes_to_size(megabytes: int) -> str:
     if megabytes % _MEGABYTES_PER_GIGABYTE == 0:
         return f"{megabytes // _MEGABYTES_PER_GIGABYTE}g"

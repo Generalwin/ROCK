@@ -76,7 +76,7 @@ class DockerDeploymentConfig(DeploymentConfig):
     """Docker image name to use for the container."""
 
     template_id: str | None = None
-    """Remote platform template reference (e.g. SandboxNext pre-built template id)."""
+    """Template id compatible with the e2b protocol (remote platforms only)."""
 
     image_os: str = "linux"
 

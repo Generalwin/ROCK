@@ -2,7 +2,7 @@
 
 The Protocol decouples RemoteOperator from any specific platform SDK.
 The first (and currently only) implementation is ``SandboxNextProvider``,
-which talks to the SandboxNext Gateway REST API.
+which talks to the SandboxManager Control HTTP API.
 
 See docs/proposals/remote-operator.md for the full design.
 """
@@ -19,6 +19,8 @@ from rock.deployments.config import DockerDeploymentConfig
 class RemoteProvider(Protocol):
     """Protocol that every remote platform provider must implement.
 
+    One operator can serve multiple providers: adding a new platform only
+    requires implementing this Protocol, not a new operator.
     The operator delegates lifecycle calls to the provider and handles
     Redis metadata merging itself, so the provider stays pure (no Redis).
     """

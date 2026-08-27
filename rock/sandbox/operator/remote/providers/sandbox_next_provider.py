@@ -21,6 +21,7 @@ from rock.deployments.config import DockerDeploymentConfig
 from rock.deployments.constants import Port
 from rock.logger import init_logger
 from rock.sandbox.operator.remote.constants import EXT_BACKEND, EXT_ENDPOINT, BACKEND_NAME
+from rock.utils.format import parse_size_to_mb
 
 logger = init_logger(__name__)
 
@@ -51,25 +52,6 @@ CLASS_HEADER = "X-Sandbox-Class"
 def _map_state(sn_state: str | None, state_map: dict[str, State] | None = None) -> State:
     table = state_map or _DEFAULT_STATE_MAP
     return table.get(sn_state or "", State.PENDING)
-
-
-def _parse_mem_to_mb(mem: str) -> int:
-    """Convert docker-style memory string (``8g``/``4096m``/``2048``) to MB."""
-    s = mem.strip().lower()
-    if not s:
-        return 0
-    if s.endswith("g"):
-        return int(float(s[:-1]) * 1024)
-    if s.endswith("m"):
-        return int(float(s[:-1]))
-    return int(float(s))
-
-
-def _parse_disk_to_mb(disk: str | None) -> int:
-    """Convert docker-style disk string (``50G``/``51200M``) to MB."""
-    if not disk:
-        return 0
-    return _parse_mem_to_mb(disk)
 
 
 class SandboxNextProvider:
@@ -132,8 +114,8 @@ class SandboxNextProvider:
             "request_id": sandbox_id,
             "resource_spec": {
                 "vcpu_count": int(config.cpus),
-                "memory_mb": _parse_mem_to_mb(config.memory),
-                "disk_size_mb": _parse_disk_to_mb(config.disk),
+                "memory_mb": parse_size_to_mb(config.memory),
+                "disk_size_mb": parse_size_to_mb(config.disk),
             },
             "metadata": {
                 "rock_sandbox_id": sandbox_id or "",
