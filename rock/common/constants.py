@@ -19,6 +19,8 @@ E2B_ENVD_VERSION = "0.1.0"
 E2B_SANDBOX_IP_METADATA_KEY = "e2b.agents.kruise.io/sandbox-ip"
 E2B_STATE_BY_ROCK_STATE: dict[str, Literal["running", "paused"]] = {
     "running": "running",
+    "pending": "running",
+    "stopped": "paused",
     "archived": "paused",
 }
 

@@ -75,6 +75,9 @@ class DockerDeploymentConfig(DeploymentConfig):
     image: str = "python:3.11"
     """Docker image name to use for the container."""
 
+    template_id: str | None = None
+    """Template id compatible with the e2b protocol (remote platforms only)."""
+
     image_os: str = "linux"
 
     port: int | None = None

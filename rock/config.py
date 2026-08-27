@@ -443,6 +443,39 @@ class OpenSandboxConfig:
 
 
 @dataclass
+class RemoteOperatorConfig:
+    """Configuration for the Remote operator backend.
+
+    Used when ``runtime.operator_type == "remote"``. Rock delegates sandbox
+    lifecycle to a remote platform (SandboxNext) via HTTP REST API. The first
+    and currently only provider is ``SandboxNextProvider``.
+    See docs/proposals/remote-operator.md.
+    """
+
+    provider: str = "sandbox_next"
+    """Provider type. Currently only "sandbox_next" is supported."""
+
+    base_url: str = ""
+    """Remote platform API base URL."""
+
+    api_key: str | None = None
+    """X-Api-Key header authentication."""
+
+    access_token: str | None = None
+    """Bearer token authentication."""
+
+    default_timeout: int = 600
+    """HTTP request timeout in seconds."""
+
+    provider_options: dict = field(default_factory=dict)
+    """Provider-specific pass-through config."""
+
+    def __post_init__(self):
+        if not self.base_url:
+            raise ValueError("RemoteOperatorConfig.base_url is required")
+
+
+@dataclass
 class RuntimeConfig:
     enable_auto_clear: bool = False
     project_root: str = field(default_factory=lambda: env_vars.ROCK_PROJECT_ROOT)
@@ -561,6 +594,7 @@ class RockConfig:
     lifecycle: SandboxLifecycleConfig = field(default_factory=SandboxLifecycleConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     opensandbox: OpenSandboxConfig = field(default_factory=OpenSandboxConfig)
+    remote: RemoteOperatorConfig | None = None
     proxy_service: ProxyServiceConfig = field(default_factory=ProxyServiceConfig)
     aes_encrypt_key: str | None = None
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -630,6 +664,8 @@ class RockConfig:
             kwargs["runtime"] = RuntimeConfig(**config["runtime"])
         if "opensandbox" in config:
             kwargs["opensandbox"] = OpenSandboxConfig(**config["opensandbox"])
+        if "remote" in config:
+            kwargs["remote"] = RemoteOperatorConfig(**config["remote"])
         if "proxy_service" in config:
             kwargs["proxy_service"] = ProxyServiceConfig(**config["proxy_service"])
         if "aes_encrypt_key" in config:
