@@ -8,12 +8,15 @@ from rock.actions.sandbox.sandbox_info import SandboxInfo
 from rock.common.constants import StopReason
 from rock.config import RemoteOperatorConfig
 from rock.deployments.config import DockerDeploymentConfig
-from rock.sandbox.operator.remote.constants import EXT_BACKEND, BACKEND_NAME
 from rock.sandbox.operator.remote.operator import RemoteOperator
 
 
 def _make_config(**overrides) -> RemoteOperatorConfig:
-    defaults = {"base_url": "https://api.sandbox.test", "api_key": "test-key"}
+    defaults = {
+        "base_url": "https://api.sandbox.test",
+        "api_key": "test-key",
+        "provider_options": {"profile_id": "test-profile"},
+    }
     defaults.update(overrides)
     return RemoteOperatorConfig(**defaults)
 
@@ -79,20 +82,17 @@ class TestRemoteOperatorGetStatus:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_get_status_returns_provider_info_with_rock_sandbox_id(self):
+    async def test_get_status_merges_redis_and_provider_info(self):
         op = RemoteOperator(_make_config())
         op._provider = AsyncMock()
         op._provider.get_status = AsyncMock(return_value={
-            "host_name": "sn-1",
             "state": State.RUNNING,
             "host_ip": "host.example.com",
-            "port_mapping": {22555: 443},
-            "auth_token": "tok",
-            "extended_params": {EXT_BACKEND: BACKEND_NAME},
         })
         op.get_sandbox_info_from_redis = AsyncMock(return_value={
             "sandbox_id": "sb-1",
             "host_name": "sn-1",
+            "image": "python:3.11",
         })
         result = await op.get_status("sb-1")
         assert result is not None
@@ -100,7 +100,7 @@ class TestRemoteOperatorGetStatus:
         assert result["host_ip"] == "host.example.com"
         assert result["sandbox_id"] == "sb-1"
         assert result["host_name"] == "sn-1"
-        assert result["extended_params"][EXT_BACKEND] == BACKEND_NAME
+        assert result["image"] == "python:3.11"
 
     @pytest.mark.asyncio
     async def test_provider_404_marks_deleted(self):

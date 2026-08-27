@@ -456,7 +456,7 @@ class RemoteOperatorConfig:
     """Provider type. Currently only "sandbox_next" is supported."""
 
     base_url: str = ""
-    """Remote platform API base URL (e.g. https://sandbox-gw.example.com)."""
+    """Remote platform API base URL."""
 
     api_key: str | None = None
     """X-Api-Key header authentication."""
@@ -468,8 +468,7 @@ class RemoteOperatorConfig:
     """HTTP request timeout in seconds."""
 
     provider_options: dict = field(default_factory=dict)
-    """Provider-specific pass-through config. Each provider parses the keys it
-    needs (e.g. region, sandbox_class, state_mapping, retry settings)."""
+    """Provider-specific pass-through config, e.g. ``profile_id`` for SandboxNext."""
 
     def __post_init__(self):
         if not self.base_url:

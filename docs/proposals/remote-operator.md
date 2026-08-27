@@ -28,7 +28,7 @@ K8s Operator 的关键设计：`K8sProvider` 是一个 `Protocol`，定义 `subm
 
 - 新增 `remote` operator 类型，通过 `runtime.operator_type: "remote"` 启用
 - 定义 `RemoteProvider` Protocol，支持不同远端平台适配
-- 实现首个 provider：`SandboxNextProvider`（SandboxNext Gateway REST API）
+- 实现首个 provider：`SandboxNextProvider`（SandboxManager Control HTTP API）
 - 不依赖 Ray，启动时跳过 Ray 初始化
 - 命令/文件执行复用现有 `SandboxProxyService`（Rocklet RPC），远端平台运行 Rocklet
 
@@ -101,27 +101,28 @@ Template 方法默认 raise `NotImplementedError`，RemoteOperator 捕获后转�
 
 定义文件：`rock/sandbox/operator/remote/providers/sandbox_next_provider.py`
 
-使用 `httpx.AsyncClient` 与 SandboxNext Gateway 通信（完整 OpenAPI 规范见 `docs/proposals/sandbox-next.yaml`）。认证支持 `X-Api-Key` 头和 Bearer token，可同时配置。
+使用 `httpx.AsyncClient` 与 SandboxManager Control HTTP API 通信（完整 OpenAPI 规范见 `docs/proposals/sandbox-next.yaml`）。认证支持 `X-Api-Key` 头和 Bearer token；租户路由通过 `X-Sandbox-Profile-ID` 头（必填，来自 `provider_options.profile_id`），沙箱形态通过 `X-Sandbox-Class` 头（可选）。profile_id 和资源 ID 不得出现在请求体中。
 
 #### API 端点摘要
 
 | Method | Path | 说明 |
 |--------|------|------|
-| `POST` | `/v1/sandboxes` | 创建沙箱，返回 `Sandbox`（201 同步 / 202 异步） |
+| `POST` | `/v1/sandboxes` | 创建沙箱，返回 `Sandbox`（201，幂等：同 request_id 返回同一对象） |
 | `GET` | `/v1/sandboxes/{id}` | 查询详情（200），404 表示不存在 |
-| `DELETE` | `/v1/sandboxes/{id}` | 删除沙箱（202 异步受理） |
-| `POST` | `/v1/sandboxes/{id}/pause` | 暂停（需 `pause_resume` capability） |
-| `POST` | `/v1/sandboxes/{id}/resume` | 恢复（需 `pause_resume` capability） |
-| `POST` | `/v1/templates` | 创建模板（202，需 `template_create` capability） |
+| `DELETE` | `/v1/sandboxes/{id}` | 删除沙箱（202 异步受理，返回 deleting 状态的 Sandbox） |
+| `POST` | `/v1/sandboxes/{id}/pause` | 暂停（202） |
+| `POST` | `/v1/sandboxes/{id}/resume` | 恢复（200） |
+| `POST` | `/v1/sandboxes/{id}/renew` | 续租（200） |
+| `POST` | `/v1/templates` | 创建模板（202） |
 | `GET` | `/v1/templates/{id}` | 查询模板（200），404 表示不存在 |
-| `DELETE` | `/v1/templates/{id}` | 删除模板（202） |
+| `DELETE` | `/v1/templates/{id}` | 删除模板（202 / 204） |
 
 #### 生命周期方法映射
 
-| Provider 方法 | SandboxNext API | 关键映射 |
-|---------------|-----------------|----------|
-| `submit` | `POST /v1/sandboxes` | `request_id` = Rock `sandbox_id`（幂等键），`resources` 从 `DockerDeploymentConfig` 转换；响应中 `sandbox_id` → `host_name`（remote sandbox id），`access.agent_token` → `auth_token`，`access.endpoint_template` → `host_ip` + `extended_params.endpoint_template` |
-| `get_status` | `GET /v1/sandboxes/{id}` | 404 → 返回 None；否则映射状态 |
+| Provider 方法 | SandboxManager API | 关键映射 |
+|---------------|--------------------|----------|
+| `submit` | `POST /v1/sandboxes` | `request_id` = Rock `sandbox_id`（幂等键），`resource_spec`（`vcpu_count`/`memory_mb`/`disk_size_mb`）从 `DockerDeploymentConfig` 转换；响应中 `sandbox_id` → `host_name`（remote sandbox id），`endpoint` → `host_ip` + `extended_params.endpoint` |
+| `get_status` | `GET /v1/sandboxes/{id}` | 404 → 返回 None；否则映射状态与 `endpoint` |
 | `stop` | `DELETE /v1/sandboxes/{id}` | 与 `delete` 同语义 |
 | `delete` | `DELETE /v1/sandboxes/{id}` | 404 → 返回 True |
 
@@ -131,18 +132,28 @@ Template 方法默认 raise `NotImplementedError`，RemoteOperator 捕获后转�
 
 #### 状态映射
 
-| SandboxNext 状态 | Rock State | 说明 |
-|------------------|-----------|------|
-| `creating` | `PENDING` | 创建中 |
-| `running` | `RUNNING` | 运行中 |
-| `pausing` | `STOPPED` | 暂停中（过渡态） |
-| `paused` | `STOPPED` | 已暂停 |
-| `resuming` | `PENDING` | 恢复中（过渡态） |
-| `failed` | `STOPPED` | 异常，不可用但未删除 |
+SandboxManager 返回 protobuf 风格的大写枚举（如 `SANDBOX_RUNNING`）：
+
+| SandboxManager 状态 | Rock State | 说明 |
+|---------------------|-----------|------|
+| `SANDBOX_STATE_UNSPECIFIED` | `PENDING` | 未指定 |
+| `SANDBOX_CREATING` | `PENDING` | 创建中 |
+| `SANDBOX_ALLOCATED` | `PENDING` | 已分配，尚未就绪 |
+| `SANDBOX_RUNNING` | `RUNNING` | 运行中 |
+| `SANDBOX_PAUSING` | `STOPPED` | 暂停中（过渡态） |
+| `SANDBOX_PAUSED` | `STOPPED` | 已暂停 |
+| `SANDBOX_PAUSE_FAILED` | `STOPPED` | 暂停失败 |
+| `SANDBOX_RESUMING` | `PENDING` | 恢复中（过渡态） |
+| `SANDBOX_RESUME_FAILED` | `STOPPED` | 恢复失败 |
+| `SANDBOX_DELETING` | `STOPPED` | 删除中（过渡态） |
+| `SANDBOX_DELETED` | `DELETED` | 已删除 |
+| `SANDBOX_FAILED` | `STOPPED` | 异常，不可用但未删除 |
+| `SANDBOX_UNKNOWN` | `PENDING` | 控制面无法确认节点事实 |
+| `SANDBOX_MIGRATING` | `PENDING` | 迁移中 |
 | GET 404 | — | Provider 返回 None |
 | 其他未知 | `PENDING` | 保守降级 |
 
-可通过 `RemoteOperatorConfig.state_mapping` 覆盖默认映射表。
+可通过 `provider_options.state_mapping` 覆盖默认映射表。
 
 #### 数据面连通
 
@@ -150,12 +161,13 @@ Provider 在 `submit()` 返回的 `SandboxInfo` 中填充：
 
 | SandboxInfo 字段 | 来源 | 说明 |
 |-------------------|------|------|
-| `host_ip` | `access.endpoint_template` | 原始字符串直接使用，不解析 |
+| `host_ip` | 响应 `endpoint` | 数据面地址（如 pod IP），原始字符串直接使用，不解析 |
 | `port_mapping` | 写死 | `{Port.PROXY: 8000, Port.SERVER: 8080, Port.SSH: 22}`，与 K8s 一致 |
-| `auth_token` | `access.agent_token` | Rocklet 认证 token |
 | `host_name` | 响应 `sandbox_id` | 平台分配的沙箱 ID（remote sandbox id） |
-| `extended_params[endpoint_template]` | `access.endpoint_template` | 原始值，供后续使用 |
+| `extended_params[endpoint]` | 响应 `endpoint` | 原始值，供后续使用 |
 | `extended_params[backend]` | 固定 `"sandbox_next"` | 后端标识 |
+
+注：Control HTTP API 响应不含访问凭证字段，`auth_token` 不再填充。
 
 `SandboxProxyService` 通过 `host_ip` + `port_mapping` 构造 Rocklet RPC 连接，与 Ray / K8s 完全一致，无需改造。
 
@@ -172,11 +184,11 @@ Provider 在 `submit()` 返回的 `SandboxInfo` 中填充：
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `provider` | `str` | `"sandbox_next"` | provider 类型 |
-| `base_url` | `str` | (必填) | Gateway API 基础 URL，例如 `http://sandbox-gw.alibaba.net` |
+| `base_url` | `str` | (必填) | SandboxManager API 基础 URL，例如 `http://sandbox-manager:8081` |
 | `api_key` | `str \| None` | `None` | `X-Api-Key` 头认证 |
 | `access_token` | `str \| None` | `None` | Bearer token 认证 |
 | `default_timeout` | `int` | `600` | HTTP 请求超时（秒） |
-| `provider_options` | `dict` | `{}` | provider 特有的额外配置，例如 `region`、`sandbox_class`、`state_mapping` |
+| `provider_options` | `dict` | `{}` | provider 特有的额外配置，例如 `profile_id`（必填）、`sandbox_class`、`state_mapping` |
 
 `base_url` 为空时抛 `ValueError`。
 
@@ -192,11 +204,11 @@ runtime:
 
 remote:
   provider: "sandbox_next"
-  base_url: "http://sandbox-gw.alibaba.net"
+  base_url: "http://sandbox-manager:8081"
   api_key: "your-x-api-key"
   default_timeout: 600
   provider_options:
-    region: "cn-wulanchabu"
+    profile_id: "rock-tenant"
     sandbox_class: "gui"
 ```
 
@@ -239,10 +251,10 @@ tests/unit/sandbox/operator/remote/
 | 多 Provider 支持 | 当前绑定 `SandboxNextProvider`，保留 Protocol + 工厂方法扩展点 | 暂无多平台需求，但抽象层不删 |
 | 探活机制 | 与 K8s/Ray 一致，复用现有逻辑 | 统一运维 |
 | 重试策略 | 5xx 指数退避（最多 3 次），4xx 直接返回 | 有限重试，避免无限等待 |
-| 数据面连通 | `endpoint_template` 直接作为 `host_ip`，`port_mapping` 写死 | 复用现有 proxy 链路，与 K8s 一致 |
-| stop 语义 | `stop` 与 `delete` 同语义 | SandboxNext 无 pause/resume，简化实现 |
+| 数据面连通 | `endpoint` 直接作为 `host_ip`，`port_mapping` 写死 | 复用现有 proxy 链路，与 K8s 一致（endpoint 为 pod IP，端口固定） |
+| stop 语义 | `stop` 与 `delete` 同语义 | Rock 不使用 pause/resume 语义，简化实现 |
 | 租约管理 | 不设 `timeout_seconds`，使用平台默认值；不实现 renew | Rock 自身的 `auto_archive_seconds` / `auto_delete_seconds` 控制生命周期 |
-| Region / Class | 全局配置，所有沙箱使用同一值 | 简化 Phase 1 |
+| Profile / Class | 全局配置（`provider_options.profile_id` / `sandbox_class`），以 header 携带，不进请求体 | Control HTTP API 约定：profile_id 与资源 ID 不得在 body 中重复 |
 
 ## 9. 与现有 Operator 对比
 

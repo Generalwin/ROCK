@@ -1,11 +1,14 @@
-"""SandboxNext provider — talks to the SandboxNext Gateway REST API.
+"""SandboxNext provider — talks to the SandboxManager Control HTTP API.
 
 Implements the RemoteProvider Protocol using httpx.AsyncClient.
-See docs/proposals/sandbox-next.yaml for the OpenAPI spec.
+See docs/proposals/sandbox-next.yaml for the OpenAPI spec. The owning profile is
+passed via the ``X-Sandbox-Profile-ID`` header on every request; region and
+class concepts live in headers too, not in request bodies.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -21,16 +24,28 @@ from rock.sandbox.operator.remote.constants import EXT_BACKEND, EXT_ENDPOINT, BA
 
 logger = init_logger(__name__)
 
-# --- SandboxNext SandboxState -> Rock State ---
+# --- SandboxManager SandboxState -> Rock State ---
 
 _DEFAULT_STATE_MAP: dict[str, State] = {
-    "creating": State.PENDING,
-    "running": State.RUNNING,
-    "pausing": State.STOPPED,
-    "paused": State.STOPPED,
-    "resuming": State.PENDING,
-    "failed": State.STOPPED,
+    "SANDBOX_STATE_UNSPECIFIED": State.PENDING,
+    "SANDBOX_CREATING": State.PENDING,
+    "SANDBOX_ALLOCATED": State.PENDING,
+    "SANDBOX_RUNNING": State.RUNNING,
+    "SANDBOX_PAUSING": State.STOPPED,
+    "SANDBOX_PAUSED": State.STOPPED,
+    "SANDBOX_PAUSE_FAILED": State.STOPPED,
+    "SANDBOX_RESUMING": State.PENDING,
+    "SANDBOX_RESUME_FAILED": State.STOPPED,
+    "SANDBOX_DELETING": State.STOPPED,
+    "SANDBOX_DELETED": State.DELETED,
+    "SANDBOX_FAILED": State.STOPPED,
+    "SANDBOX_UNKNOWN": State.PENDING,
+    "SANDBOX_MIGRATING": State.PENDING,
 }
+
+# Control HTTP API headers
+PROFILE_ID_HEADER = "X-Sandbox-Profile-ID"
+CLASS_HEADER = "X-Sandbox-Class"
 
 
 def _map_state(sn_state: str | None, state_map: dict[str, State] | None = None) -> State:
@@ -58,7 +73,7 @@ def _parse_disk_to_mb(disk: str | None) -> int:
 
 
 class SandboxNextProvider:
-    """Provider that talks to the SandboxNext Gateway REST API."""
+    """Provider that talks to the SandboxManager Control HTTP API."""
 
     def __init__(self, config: RemoteOperatorConfig, *, client: httpx.AsyncClient | None = None):
         self._config = config
@@ -66,11 +81,15 @@ class SandboxNextProvider:
         self._state_map = opts.get("state_mapping") or _DEFAULT_STATE_MAP
         self._retry_max = opts.get("retry_max", 3)
         self._retry_backoff = opts.get("retry_backoff_base", 0.5)
-        self._region = opts.get("region", "cn-hangzhou")
-        self._sandbox_class = opts.get("sandbox_class", "headless-vm")
+        self._profile_id = opts.get("profile_id", "")
+        self._sandbox_class = opts.get("sandbox_class", "")
+        if not self._profile_id:
+            raise ValueError("provider_options.profile_id is required (X-Sandbox-Profile-ID header)")
 
         base_url = config.base_url
-        headers: dict[str, str] = {}
+        headers: dict[str, str] = {PROFILE_ID_HEADER: self._profile_id}
+        if self._sandbox_class:
+            headers[CLASS_HEADER] = self._sandbox_class
         if config.api_key:
             headers["X-Api-Key"] = config.api_key
         if config.access_token:
@@ -78,10 +97,16 @@ class SandboxNextProvider:
 
         self._client = client or httpx.AsyncClient(
             base_url=base_url,
-            headers=headers,
             timeout=config.default_timeout,
         )
-        logger.info("Initialized SandboxNextProvider (base_url=%s, region=%s)", config.base_url, self._region)
+        # Auth / routing headers are provider-level; apply even to an injected client.
+        self._client.headers.update(headers)
+        logger.info(
+            "Initialized SandboxNextProvider (base_url=%s, profile_id=%s, class=%s)",
+            config.base_url,
+            self._profile_id,
+            self._sandbox_class,
+        )
 
     # --- HTTP helpers ---
 
@@ -91,8 +116,6 @@ class SandboxNextProvider:
         retry_count = 0
         while response.status_code >= 500 and retry_count < self._retry_max:
             retry_count += 1
-            import asyncio
-
             await asyncio.sleep(self._retry_backoff * (2 ** (retry_count - 1)))
             response = await self._client.request(method, path, **kwargs)
         return response
@@ -107,12 +130,10 @@ class SandboxNextProvider:
 
         body: dict[str, Any] = {
             "request_id": sandbox_id,
-            "region": self._region,
-            "class": self._sandbox_class,
-            "resources": {
-                "vcpu": int(config.cpus),
+            "resource_spec": {
+                "vcpu_count": int(config.cpus),
                 "memory_mb": _parse_mem_to_mb(config.memory),
-                "disk_mb": _parse_disk_to_mb(config.disk),
+                "disk_size_mb": _parse_disk_to_mb(config.disk),
             },
             "metadata": {
                 "rock_sandbox_id": sandbox_id or "",
@@ -132,9 +153,7 @@ class SandboxNextProvider:
 
         sn_id = data["sandbox_id"]
         sn_state = data.get("state")
-        access = data.get("access") or {}
-        endpoint_template = access.get("endpoint_template", "")
-        agent_token = access.get("agent_token", "")
+        endpoint = data.get("endpoint") or ""
 
         logger.info("[%s] sandbox_next submitted, remote_id=%s, state=%s", sandbox_id, sn_id, sn_state)
 
@@ -148,16 +167,15 @@ class SandboxNextProvider:
             "experiment_id": experiment_id,
             "namespace": namespace,
             "state": _map_state(sn_state, self._state_map),
-            "host_ip": endpoint_template,
+            "host_ip": endpoint,
             "port_mapping": {
                 Port.PROXY: 8000,
                 Port.SERVER: 8080,
                 Port.SSH: 22,
             },
-            "auth_token": agent_token,
             "extended_params": {
                 EXT_BACKEND: BACKEND_NAME,
-                EXT_ENDPOINT: endpoint_template,
+                EXT_ENDPOINT: endpoint,
             },
         }
         return info
@@ -170,20 +188,17 @@ class SandboxNextProvider:
         data = response.json()
 
         sn_state = data.get("state")
-        access = data.get("access") or {}
-        endpoint_template = access.get("endpoint_template", "")
-        agent_token = access.get("agent_token", "")
+        endpoint = data.get("endpoint") or ""
 
         # Only return fields that change at runtime; static fields are already in redis.
         info: SandboxInfo = {
             "state": _map_state(sn_state, self._state_map),
-            "host_ip": endpoint_template,
-            "auth_token": agent_token,
+            "host_ip": endpoint,
         }
         return info
 
     async def stop(self, remote_sandbox_id: str) -> bool:
-        """Stop the sandbox by deleting it."""
+        """Stop the sandbox by deleting it (Rock does not use pause/resume)."""
         return await self.delete(remote_sandbox_id)
 
     async def delete(self, remote_sandbox_id: str) -> bool:
