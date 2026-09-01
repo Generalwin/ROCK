@@ -191,6 +191,7 @@ async def lifespan(app: FastAPI):
 
     # init sandbox service
     proxy_service_ref = None
+    e2b_proxy_service_ref = None
     if env_vars.ROCK_ADMIN_ROLE == "admin":
         # init ray service only for operators that need a local Ray cluster.
         # opensandbox delegates the full lifecycle to an external service, so it
@@ -266,36 +267,45 @@ async def lifespan(app: FastAPI):
 
     else:
         sandbox_manager = create_sandbox_proxy_service(rock_config=rock_config, meta_store=meta_store)
-        set_e2b_proxy_service(E2BProxyService(sandbox_service=sandbox_manager, meta_store=meta_store))
+        e2b_proxy_service_ref = E2BProxyService(
+            sandbox_manager=sandbox_manager,
+            meta_store=meta_store,
+        )
+        set_e2b_proxy_service(e2b_proxy_service_ref)
         set_sandbox_proxy_service(sandbox_manager)
         proxy_service_ref = sandbox_manager
 
     logger.info("rock-admin start")
 
-    yield
+    try:
+        yield
+    finally:
+        # stop scheduler thread
+        if scheduler_thread:
+            scheduler_thread.stop()
+            logger.info("Scheduler thread stopped")
+        if scheduler_metrics_monitor:
+            await asyncio.to_thread(scheduler_metrics_monitor.shutdown)
+            logger.info("Scheduler metrics monitor stopped")
 
-    # stop scheduler thread
-    if scheduler_thread:
-        scheduler_thread.stop()
-        logger.info("Scheduler thread stopped")
-    if scheduler_metrics_monitor:
-        await asyncio.to_thread(scheduler_metrics_monitor.shutdown)
-        logger.info("Scheduler metrics monitor stopped")
+        if e2b_proxy_service_ref is not None:
+            await e2b_proxy_service_ref.aclose()
+            logger.info("E2B proxy process tasks closed")
 
-    if proxy_service_ref is not None:
-        await proxy_service_ref.aclose()
-        logger.info("proxy httpx clients closed")
+        if proxy_service_ref is not None:
+            await proxy_service_ref.aclose()
+            logger.info("proxy httpx clients closed")
 
-    await rock_config.http_pool_manager.aclose_all()
-    logger.info("http pool manager closed")
+        await rock_config.http_pool_manager.aclose_all()
+        logger.info("http pool manager closed")
 
-    if db_provider:
-        await db_provider.close()
+        if db_provider:
+            await db_provider.close()
 
-    if redis_provider:
-        await redis_provider.close_pool()
+        if redis_provider:
+            await redis_provider.close_pool()
 
-    logger.info("rock-admin exit")
+        logger.info("rock-admin exit")
 
 
 async def base_exception_handler(request: Request, exc: Exception):

@@ -163,7 +163,13 @@ class OpenSandboxProxyService(SandboxProxyService):
         return await self._opensandbox_backend.upload(sandbox_id, info, file, target_path)
 
     @monitor_sandbox_operation()
-    async def execute(self, command: Command) -> CommandResponse:
+    async def execute(
+        self,
+        command: Command,
+        *,
+        propagate_rocklet_errors: bool = False,
+    ) -> CommandResponse:
+        del propagate_rocklet_errors
         await self._update_expire_time(command.sandbox_id)
         info = await self._get_runtime_info(command.sandbox_id)
         command = command.model_copy(update={"env": self._merge_sandbox_env(info, command.env)})

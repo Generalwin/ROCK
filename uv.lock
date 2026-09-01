@@ -4610,6 +4610,7 @@ sandbox-actor = [
 [package.dev-dependencies]
 test = [
     { name = "ap-sandbox" },
+    { name = "e2b" },
     { name = "iflow-cli-sdk" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -4697,6 +4698,7 @@ provides-extras = ["admin", "rocklet", "sandbox-actor", "builder", "model-servic
 [package.metadata.requires-dev]
 test = [
     { name = "ap-sandbox", specifier = ">=0.1.2" },
+    { name = "e2b", specifier = "==2.34.0" },
     { name = "iflow-cli-sdk", specifier = ">=0.1.1" },
     { name = "pre-commit", specifier = ">=4.3.0" },
     { name = "pytest" },

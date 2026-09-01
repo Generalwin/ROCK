@@ -27,6 +27,8 @@ def test_proxy_role_mounts_proxy_router():
     assert "/sandboxes" not in paths
     assert _methods_for_path(app, "/sandboxes/{sandboxID}") == set()
     assert "/v2/sandboxes" in paths
+    assert "/process.Process/Start" in paths
+    assert "/health" in paths
 
 
 def test_proxy_role_excludes_admin_router():
@@ -48,6 +50,8 @@ def test_admin_role_mounts_admin_routers():
     assert "/sandboxes" in paths
     assert _methods_for_path(app, "/sandboxes/{sandboxID}") == {"DELETE", "GET"}
     assert "/v2/sandboxes" not in paths
+    assert "/process.Process/Start" not in paths
+    assert "/health" not in paths
 
 
 @pytest.mark.skipif(not hasattr(socket, "SO_REUSEPORT"), reason="SO_REUSEPORT unavailable")

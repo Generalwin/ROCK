@@ -78,6 +78,7 @@ async def test_send_request_redacts_environment_in_logs(service):
             payload,
             None,
             "POST",
+            propagate_rocklet_errors=True,
         )
 
     log_info.assert_any_call("json_data: %s", {"command": "pwd", "env": "<redacted>"})

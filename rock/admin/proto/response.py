@@ -7,13 +7,93 @@ from rock.actions.sandbox.response import State, StateTransitionRecord
 from rock.actions.sandbox.sandbox_info import SandboxInfo
 from rock.admin.proto.request import TaskSetSpec
 from rock.sandbox.utils.timeout import SandboxTimeoutHelper
+from rock.sdk.common.e2b import E2BConnectCode
 
 
 class E2BCreateSandboxResponse(BaseModel):
     sandbox_id: str = Field(alias="sandboxID")
     envd_version: str = Field(alias="envdVersion")
+    envd_access_token: str | None = Field(default=None, alias="envdAccessToken")
     client_id: str = Field(alias="clientID")
     template_id: str = Field(alias="templateID")
+
+
+class E2BConnectErrorPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    code: E2BConnectCode
+    message: str
+
+
+class E2BConnectEndResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    error: E2BConnectErrorPayload | None = None
+
+
+class E2BProcessStartEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    pid: int = Field(gt=0)
+
+
+class E2BProcessDataEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    stdout: str | None = None
+    stderr: str | None = None
+
+
+class E2BProcessEndEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True)
+
+    exit_code: int = Field(alias="exitCode")
+    exited: bool
+    error: str | None = None
+
+
+class E2BProcessKeepaliveEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class E2BProcessEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    start: E2BProcessStartEvent | None = None
+    data: E2BProcessDataEvent | None = None
+    end: E2BProcessEndEvent | None = None
+    keepalive: E2BProcessKeepaliveEvent | None = None
+
+
+class E2BProcessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    event: E2BProcessEvent
+
+    @classmethod
+    def started(cls, pid: int) -> "E2BProcessResponse":
+        return cls(event=E2BProcessEvent(start=E2BProcessStartEvent(pid=pid)))
+
+    @classmethod
+    def stdout(cls, content: str) -> "E2BProcessResponse":
+        return cls(event=E2BProcessEvent(data=E2BProcessDataEvent(stdout=content)))
+
+    @classmethod
+    def stderr(cls, content: str) -> "E2BProcessResponse":
+        return cls(event=E2BProcessEvent(data=E2BProcessDataEvent(stderr=content)))
+
+    @classmethod
+    def keepalive_event(cls) -> "E2BProcessResponse":
+        return cls(event=E2BProcessEvent(keepalive=E2BProcessKeepaliveEvent()))
+
+    @classmethod
+    def ended(cls, exit_code: int) -> "E2BProcessResponse":
+        error = f"exit status {exit_code}" if exit_code != 0 else None
+        return cls(
+            event=E2BProcessEvent(
+                end=E2BProcessEndEvent(exitCode=exit_code, exited=True, error=error),
+            )
+        )
 
 
 class E2BSandboxInfo(BaseModel):

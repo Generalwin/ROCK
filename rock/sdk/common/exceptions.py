@@ -1,5 +1,6 @@
 from rock._codes import codes
 from rock.actions import CommitErrorCode, SandboxResponse
+from rock.sdk.common.e2b import E2BConnectCode
 from rock.utils.deprecated import deprecated
 
 
@@ -11,6 +12,13 @@ class WorkerCommitError(Exception):
 
 class E2BSandboxNotFoundError(Exception):
     pass
+
+
+class E2BConnectError(Exception):
+    def __init__(self, code: E2BConnectCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class RockException(Exception):

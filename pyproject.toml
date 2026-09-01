@@ -112,6 +112,7 @@ rock = "rock.cli.main:main"
 [dependency-groups]
 test = [
     "ap-sandbox>=0.1.2",
+    "e2b==2.34.0",
     "pre-commit>=4.3.0",
     "ruff>=0.14.0",
     "iflow-cli-sdk>=0.1.1",

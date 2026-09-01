@@ -1,22 +1,130 @@
 import asyncio
+import base64
 import re
+from collections.abc import AsyncIterator
 from urllib.parse import parse_qsl, unquote
 
-from rock.admin.proto.response import E2BListedSandbox, SandboxStatusResponse
+from rock.actions import CommandResponse
+from rock.actions.sandbox.response import State
+from rock.admin.proto.e2b_connect import encode_connect_end, encode_connect_message
+from rock.admin.proto.request import SandboxCommand
+from rock.admin.proto.response import (
+    E2BConnectErrorPayload,
+    E2BListedSandbox,
+    E2BProcessResponse,
+    SandboxStatusResponse,
+)
 from rock.admin.service.e2b_sandbox_info import e2b_sandbox_info_fields
+from rock.logger import init_logger
 from rock.sandbox.sandbox_meta_store import SandboxMetaStore
+from rock.sandbox.service.sandbox_proxy_service import SandboxProxyService
 from rock.sandbox.utils.timeout import SandboxTimeoutHelper
-from rock.sdk.common.exceptions import BadRequestRockError
+from rock.sdk.common.exceptions import BadRequestRockError, SandboxNotFoundRockError
 
 _INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+PROCESS_REGISTRY_LIMIT = 1024
+logger = init_logger(__name__)
 
 
 class E2BProxyService:
-    def __init__(self, meta_store: SandboxMetaStore, *, sandbox_service: object | None = None) -> None:
-        # Kept as a keyword-only compatibility argument so main.py wiring does
-        # not need to change; list operations depend only on the metadata store.
-        del sandbox_service
+    def __init__(
+        self,
+        meta_store: SandboxMetaStore,
+        *,
+        sandbox_manager: SandboxProxyService | None = None,
+    ) -> None:
         self._meta_store = meta_store
+        self._sandbox_manager = sandbox_manager
+        self._next_pid = 0
+        self._process_tasks: dict[tuple[str, int], asyncio.Task[CommandResponse]] = {}
+
+    async def _sandbox_state(self, sandbox_id: str) -> State | str | None:
+        record = await self._meta_store.get(sandbox_id, check_db=True)
+        return record.get("state") if record else None
+
+    async def require_running_sandbox(self, sandbox_id: str) -> None:
+        state = await self._sandbox_state(sandbox_id)
+        if state != State.RUNNING and state != State.RUNNING.value:
+            raise SandboxNotFoundRockError("sandbox is not running")
+
+    async def is_running(self, sandbox_id: str) -> bool:
+        state = await self._sandbox_state(sandbox_id)
+        return state == State.RUNNING or state == State.RUNNING.value
+
+    async def start_process(
+        self,
+        command: SandboxCommand,
+        *,
+        keepalive_interval: float = 50.0,
+    ) -> AsyncIterator[bytes]:
+        if self._sandbox_manager is None:
+            raise RuntimeError("E2B sandbox manager is not configured")
+        if len(self._process_tasks) >= PROCESS_REGISTRY_LIMIT:
+            yield encode_connect_end(
+                E2BConnectErrorPayload(
+                    code="resource_exhausted",
+                    message="too many E2B commands are running",
+                )
+            )
+            return
+
+        self._next_pid = 1 if self._next_pid >= 2**32 - 1 else self._next_pid + 1
+        pid = self._next_pid
+        task = asyncio.create_task(
+            self._sandbox_manager.execute(
+                command,
+                propagate_rocklet_errors=True,
+            )
+        )
+        task_key = (command.sandbox_id, pid)
+        self._process_tasks[task_key] = task
+
+        def remove_task(completed: asyncio.Task[CommandResponse]) -> None:
+            self._process_tasks.pop(task_key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(remove_task)
+        yield encode_connect_message(E2BProcessResponse.started(pid))
+
+        try:
+            while not task.done():
+                await asyncio.wait({task}, timeout=keepalive_interval)
+                if not task.done():
+                    yield encode_connect_message(E2BProcessResponse.keepalive_event())
+            result: CommandResponse = await asyncio.shield(task)
+        except TimeoutError:
+            yield encode_connect_end(E2BConnectErrorPayload(code="deadline_exceeded", message="command timed out"))
+            return
+        except ValueError:
+            logger.warning("E2B process command was rejected", exc_info=True)
+            yield encode_connect_end(E2BConnectErrorPayload(code="invalid_argument", message="invalid command request"))
+            return
+        except ConnectionError:
+            logger.warning("E2B process backend is unavailable", exc_info=True)
+            yield encode_connect_end(
+                E2BConnectErrorPayload(code="unavailable", message="sandbox command service is unavailable")
+            )
+            return
+        except Exception:
+            logger.exception("E2B process execution failed")
+            yield encode_connect_end(E2BConnectErrorPayload(code="internal", message="internal server error"))
+            return
+        if result.stdout:
+            yield encode_connect_message(E2BProcessResponse.stdout(base64.b64encode(result.stdout.encode()).decode()))
+        if result.stderr:
+            yield encode_connect_message(E2BProcessResponse.stderr(base64.b64encode(result.stderr.encode()).decode()))
+        exit_code = 0 if result.exit_code is None else int(result.exit_code)
+        yield encode_connect_message(E2BProcessResponse.ended(exit_code))
+        yield encode_connect_end()
+
+    async def aclose(self) -> None:
+        tasks = list(self._process_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._process_tasks.clear()
 
     async def list_sandboxes(self, metadata: str) -> list[E2BListedSandbox]:
         records = await self._meta_store.list_running_by_metadata(self._parse_metadata_filter(metadata))

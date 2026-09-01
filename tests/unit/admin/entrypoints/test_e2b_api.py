@@ -5,10 +5,26 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from rock.actions.sandbox.response import State
+from rock.admin.entrypoints import e2b_api as e2b_api_module
 from rock.admin.entrypoints.e2b_api import e2b_router, set_e2b_service
 from rock.admin.proto.response import SandboxStartResponse, SandboxStatusResponse
 from rock.admin.service.e2b_service import E2BService
 from rock.sdk.common.exceptions import BadRequestRockError, InternalServerRockError
+
+_MISSING = object()
+
+
+@pytest.fixture(autouse=True)
+def _restore_e2b_service():
+    previous_service = getattr(e2b_api_module, "e2b_service", _MISSING)
+    try:
+        yield
+    finally:
+        if previous_service is _MISSING:
+            if hasattr(e2b_api_module, "e2b_service"):
+                delattr(e2b_api_module, "e2b_service")
+        else:
+            set_e2b_service(previous_service)
 
 
 @pytest.fixture
@@ -95,9 +111,11 @@ async def test_create_sandbox_returns_e2b_response_and_maps_request(e2b_app):
         )
 
     assert response.status_code == 201
+    assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
         "sandboxID": "sandbox-123",
-        "envdVersion": "0.1.0",
+        "envdVersion": "0.3.0",
+        "envdAccessToken": "e2b-key",
         "clientID": "rock",
         "templateID": "linux-dind",
     }
@@ -262,7 +280,7 @@ async def test_get_sandbox_returns_e2b_detail_from_manager_status(e2b_app):
         "state": "running",
         "clientID": "rock",
         "templateID": "linux-dind",
-        "envdVersion": "0.1.0",
+        "envdVersion": "0.3.0",
         "cpuCount": 4,
         "memoryMB": 8192,
         "diskSizeMB": 20480,

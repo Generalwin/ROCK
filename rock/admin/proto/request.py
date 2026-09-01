@@ -29,6 +29,28 @@ class E2BCreateSandboxRequest(BaseModel):
     auto_resume: dict[str, Any] | None = Field(default=None, alias="autoResume")
 
 
+class E2BProcessConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    cmd: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    envs: dict[str, str] = Field(default_factory=dict)
+    cwd: str | None = None
+
+
+class E2BPTYConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+
+class E2BStartRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    process: E2BProcessConfig
+    pty: E2BPTYConfig | None = None
+    tag: str | None = None
+    stdin: bool = False
+
+
 class SandboxStartRequest(BaseModel):
     image: NonBlankStr
     """image"""
@@ -208,6 +230,7 @@ class StartHeaders:
         x_namespace: str | None = Header(default="default", alias="X-Namespace"),
         x_cluster: str | None = Header(default="default", alias="X-Cluster"),
     ):
+        self.api_key = x_api_key
         if x_api_key is not None:
             rock_authorization = f"{BEARER_AUTHORIZATION_PREFIX}{x_api_key}"
         self.user_info: UserInfo = {

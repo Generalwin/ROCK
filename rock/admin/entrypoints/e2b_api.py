@@ -67,6 +67,7 @@ def _error_response(status_code: int, message: str) -> JSONResponse:
 )
 async def create_sandbox(
     request: E2BCreateSandboxRequest,
+    response: Response,
     headers: Annotated[StartHeaders, Depends()],
 ) -> E2BCreateSandboxResponse:
     # ROCK stores lifecycle TTLs in whole minutes. Round up so an E2B timeout
@@ -84,9 +85,11 @@ async def create_sandbox(
         user_info=headers.user_info,
         cluster_info=headers.cluster_info,
     )
+    response.headers["Cache-Control"] = "no-store"
     return E2BCreateSandboxResponse(
         sandboxID=result.sandbox_id,
         envdVersion=E2B_ENVD_VERSION,
+        envdAccessToken=headers.api_key,
         clientID=E2B_CLIENT_ID,
         templateID=request.template_id,
     )

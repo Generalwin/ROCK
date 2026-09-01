@@ -56,6 +56,7 @@ from rock.sdk.common.exceptions import (
     WorkerCommitError,
 )
 from rock.rocklet import __version__ as swe_version
+from rock.rocklet.exceptions import CommandTimeoutError
 from rock.sandbox import __version__ as gateway_version
 from rock.utils import EAGLE_EYE_TRACE_ID, trace_id_ctx_var
 
@@ -255,13 +256,27 @@ class SandboxProxyService:
         return UploadResponse(**response)
 
     @monitor_sandbox_operation()
-    async def execute(self, command: Command) -> CommandResponse:
+    async def execute(
+        self,
+        command: Command,
+        *,
+        propagate_rocklet_errors: bool = False,
+    ) -> CommandResponse:
         sandbox_id = command.sandbox_id
         await self._update_expire_time(sandbox_id)
         sandbox_status_dicts = await self.get_service_status(sandbox_id)
         payload = command.model_dump()
         payload["env"] = self._merge_sandbox_env(sandbox_status_dicts[0], command.env)
-        response = await self._send_request(sandbox_id, sandbox_status_dicts[0], "execute", None, payload, None, "POST")
+        response = await self._send_request(
+            sandbox_id,
+            sandbox_status_dicts[0],
+            "execute",
+            None,
+            payload,
+            None,
+            "POST",
+            propagate_rocklet_errors=propagate_rocklet_errors,
+        )
         return CommandResponse(**response)
 
     @monitor_sandbox_operation()
@@ -732,6 +747,8 @@ class SandboxProxyService:
         json_data: dict | None,
         files: dict | None,
         method: str,
+        *,
+        propagate_rocklet_errors: bool = False,
     ):
         host_ip = sandbox_status_dict.get("host_ip")
         service_status = ServiceStatus.from_dict(sandbox_status_dict)
@@ -755,14 +772,34 @@ class SandboxProxyService:
                 files=files if files else None,
             )
             if response.status_code == 511:
-                return {"exit_code": -1, "failure_reason": response.json()["rockletexception"]["message"]}
+                rocklet_exception = response.json()["rockletexception"]
+                if propagate_rocklet_errors:
+                    timeout_class_path = f"{CommandTimeoutError.__module__}.{CommandTimeoutError.__qualname__}"
+                    if rocklet_exception.get("class_path") == timeout_class_path:
+                        raise CommandTimeoutError(rocklet_exception["message"])
+                    invalid_command_exceptions = {
+                        "builtins.FileNotFoundError",
+                        "builtins.NotADirectoryError",
+                        "builtins.PermissionError",
+                        "builtins.ValueError",
+                    }
+                    if rocklet_exception.get("class_path") in invalid_command_exceptions:
+                        raise ValueError(rocklet_exception["message"])
+                    raise RuntimeError(rocklet_exception["message"])
+                return {"exit_code": -1, "failure_reason": rocklet_exception["message"]}
             if response.status_code == HTTP_504_GATEWAY_TIMEOUT:
-                return {"exit_code": -1, "failure_reason": response.json()["detail"]}
+                message = response.json()["detail"]
+                if propagate_rocklet_errors:
+                    raise CommandTimeoutError(message)
+                return {"exit_code": -1, "failure_reason": message}
             return response.json()
         except httpx.RequestError as e:
             # Handle network-level errors, such as DNS resolution failure, connection timeout, etc.
             logger.error(f"Error forwarding request to full_request_url: {str(e)}", exc_info=True)
-            raise Exception("Service unavailable: Upstream server is not reachable.")
+            message = "Service unavailable: Upstream server is not reachable."
+            if propagate_rocklet_errors:
+                raise ConnectionError(message) from e
+            raise Exception(message) from e
 
     def _headers(self, sandbox_id: str) -> dict[str, str]:
         headers = {"sandbox_id": sandbox_id, EAGLE_EYE_TRACE_ID: trace_id_ctx_var.get()}

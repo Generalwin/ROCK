@@ -5,9 +5,25 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from rock.actions.sandbox.response import State
+from rock.admin.entrypoints import e2b_proxy_api as e2b_proxy_api_module
 from rock.admin.entrypoints.e2b_proxy_api import e2b_proxy_router, set_e2b_proxy_service
 from rock.admin.service.e2b_proxy_service import E2BProxyService
 from rock.sandbox.sandbox_meta_store import SandboxMetaStore
+
+_MISSING = object()
+
+
+@pytest.fixture(autouse=True)
+def _restore_e2b_proxy_service():
+    previous_service = getattr(e2b_proxy_api_module, "e2b_proxy_service", _MISSING)
+    try:
+        yield
+    finally:
+        if previous_service is _MISSING:
+            if hasattr(e2b_proxy_api_module, "e2b_proxy_service"):
+                delattr(e2b_proxy_api_module, "e2b_proxy_service")
+        else:
+            set_e2b_proxy_service(previous_service)
 
 
 @pytest.fixture
@@ -102,7 +118,7 @@ async def test_list_sandboxes_returns_complete_e2b_summary_from_persisted_record
             "state": "running",
             "clientID": "rock",
             "templateID": "linux-dind",
-            "envdVersion": "0.1.0",
+            "envdVersion": "0.3.0",
             "cpuCount": 4,
             "memoryMB": 8192,
             "diskSizeMB": 20480,
@@ -136,7 +152,7 @@ async def test_list_sandboxes_returns_running_sandboxes_without_headers(e2b_list
             "state": "running",
             "clientID": "rock",
             "templateID": "linux-dind",
-            "envdVersion": "0.1.0",
+            "envdVersion": "0.3.0",
             "cpuCount": 4,
             "memoryMB": 8192,
             "diskSizeMB": 20480,
