@@ -470,6 +470,9 @@ class RemoteOperatorConfig:
     provider_options: dict = field(default_factory=dict)
     """Provider-specific pass-through config."""
 
+    templates: dict[str, dict] = field(default_factory=dict)
+    """Raw-mode rendering templates, same structure as K8sConfig.templates."""
+
     def __post_init__(self):
         if not self.base_url:
             raise ValueError("RemoteOperatorConfig.base_url is required")

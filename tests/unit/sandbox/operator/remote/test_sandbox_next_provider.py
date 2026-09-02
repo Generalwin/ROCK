@@ -1,12 +1,14 @@
 """Unit tests for SandboxNextProvider — mock httpx transport."""
 
+import json
+
 import pytest
 import httpx
 
 from rock.actions.sandbox.response import State
 from rock.config import RemoteOperatorConfig
 from rock.deployments.config import DockerDeploymentConfig
-from rock.sandbox.operator.remote.constants import EXT_ENDPOINT, EXT_BACKEND, BACKEND_NAME
+from rock.sandbox.operator.remote.constants import EXT_ENDPOINT, EXT_BACKEND, EXT_USE_RAW, EXT_USE_RAW_ENABLED, BACKEND_NAME
 from rock.sandbox.operator.remote.providers.sandbox_next_provider import (
     SandboxNextProvider,
     _derive_sandbox_class,
@@ -43,6 +45,26 @@ def _make_client(handler) -> httpx.AsyncClient:
         base_url="https://api.sandbox.test",
         transport=httpx.MockTransport(handler),
     )
+
+
+_RAW_TEMPLATES = {
+    "default": {
+        "ports": {"proxy": 8000, "server": 8080, "ssh": 22},
+        "template": {
+            "metadata": {"labels": {"example.app": "rock-sandbox"}},
+            "spec": {
+                "tolerations": [{"operator": "Exists"}],
+                "containers": [
+                    {
+                        "name": "sandbox",
+                        "image": "{{ image }}",
+                        "resources": {"requests": {"cpu": "{{ cpus }}", "memory": "{{ memory }}"}},
+                    }
+                ],
+            },
+        },
+    }
+}
 
 
 # --- Utility tests ---
@@ -222,6 +244,87 @@ class TestSandboxNextProviderSubmit:
         await provider.submit(_make_docker_config(), {})
         assert "region" not in seen["body"]
         assert "class" not in seen["body"]
+
+
+class TestSandboxNextProviderSubmitRaw:
+    @pytest.mark.asyncio
+    async def test_submit_raw_sends_manifest_string(self):
+        seen = {"body": None}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(201, json={"sandbox_id": "sn-raw-1", "state": "SANDBOX_CREATING"})
+
+        config = _make_config(templates=_RAW_TEMPLATES)
+        provider = SandboxNextProvider(config, client=_make_client(handler))
+        info = await provider.submit(_make_docker_config(extended_params={EXT_USE_RAW: EXT_USE_RAW_ENABLED}), {})
+
+        assert set(seen["body"].keys()) == {"raw"}
+        assert isinstance(seen["body"]["raw"], str)
+        manifest = json.loads(seen["body"]["raw"])
+        assert manifest["apiVersion"] == "sandbox.opensandbox.io/v1alpha1"
+        assert manifest["kind"] == "BatchSandbox"
+        assert manifest["metadata"]["name"] == "sb-test-001"
+        assert manifest["metadata"]["labels"]["rock.sandbox/sandbox-id"] == "sb-test-001"
+        container = manifest["spec"]["template"]["spec"]["containers"][0]
+        assert container["image"] == "python:3.11"
+        assert container["resources"]["requests"]["memory"] == "8.00Gi"
+        assert info["host_name"] == "sn-raw-1"
+
+    @pytest.mark.asyncio
+    async def test_submit_raw_port_mapping_from_template(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(201, json={"sandbox_id": "sn-raw-2", "state": "SANDBOX_RUNNING"})
+
+        templates = {"default": {"ports": {"proxy": 9000, "server": 8081, "ssh": 2222}, "template": {"spec": {"containers": [{"name": "sandbox", "image": "{{ image }}"}]}}}}
+        config = _make_config(templates=templates)
+        provider = SandboxNextProvider(config, client=_make_client(handler))
+        info = await provider.submit(_make_docker_config(extended_params={EXT_USE_RAW: EXT_USE_RAW_ENABLED}), {})
+        assert info["port_mapping"] == {22555: 9000, 8080: 8081, 22: 2222}
+
+    @pytest.mark.asyncio
+    async def test_submit_raw_merges_env_vars(self):
+        seen = {"body": None}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(201, json={"sandbox_id": "sn-raw-3", "state": "SANDBOX_RUNNING"})
+
+        config = _make_config(templates=_RAW_TEMPLATES)
+        provider = SandboxNextProvider(config, client=_make_client(handler))
+        await provider.submit(_make_docker_config(extended_params={EXT_USE_RAW: EXT_USE_RAW_ENABLED}, env_vars={"FOO": "bar"}), {})
+        manifest = json.loads(seen["body"]["raw"])
+        env = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
+        assert {"name": "FOO", "value": "bar"} in env
+
+    @pytest.mark.asyncio
+    async def test_submit_raw_without_templates_raises(self):
+        provider = SandboxNextProvider(_make_config(), client=_make_client(lambda r: httpx.Response(201)))
+        with pytest.raises(ValueError, match="RemoteOperatorConfig.templates"):
+            await provider.submit(_make_docker_config(extended_params={EXT_USE_RAW: EXT_USE_RAW_ENABLED}), {})
+
+    @pytest.mark.asyncio
+    async def test_template_id_wins_over_use_raw(self):
+        seen = {"body": None}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(201, json={"sandbox_id": "sn-tpl", "state": "SANDBOX_RUNNING"})
+
+        config = _make_config(templates=_RAW_TEMPLATES)
+        provider = SandboxNextProvider(config, client=_make_client(handler))
+        await provider.submit(
+            _make_docker_config(template_id="pool-sample", extended_params={EXT_USE_RAW: EXT_USE_RAW_ENABLED}),
+            {},
+        )
+        assert seen["body"]["template_id"] == "pool-sample"
+        assert "raw" not in seen["body"]
 
 
 class TestSandboxNextProviderGetStatus:

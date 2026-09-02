@@ -47,6 +47,32 @@ def megabytes_to_size(megabytes: int) -> str:
     return f"{megabytes}m"
 
 
+def normalize_memory_to_k8s(memory: str) -> str:
+    """Normalize a size string ('2g'/'2048m') to K8s format ('2Gi'/'2048Mi')."""
+    if re.match(r"^\d+(\.\d+)?(Ei|Pi|Ti|Gi|Mi|Ki)$", memory):
+        return memory
+    match = re.match(r"^(\d+(\.\d+)?)([a-zA-Z]*)$", memory)
+    if not match:
+        try:
+            return f"{int(memory) // (1024 * 1024)}Mi"
+        except (ValueError, TypeError):
+            return memory
+    value = float(match.group(1))
+    unit = match.group(3).lower()
+    if unit in ("", "b"):
+        mi = value / (1024 * 1024)
+        return f"{int(mi) if mi == int(mi) else mi:.2f}Mi"
+    if unit in ("k", "kb"):
+        return f"{int(value) if value == int(value) else value:.2f}Ki"
+    if unit in ("m", "mb"):
+        return f"{int(value) if value == int(value) else value:.2f}Mi"
+    if unit in ("g", "gb"):
+        return f"{int(value) if value == int(value) else value:.2f}Gi"
+    if unit in ("t", "tb"):
+        return f"{int(value) if value == int(value) else value:.2f}Ti"
+    return memory
+
+
 def convert_to_gb(size_str: str) -> str:
     bytes_size = parse_size_to_bytes(size_str)
     gb_size = bytes_size / (1024**3)

@@ -159,8 +159,10 @@ async def test_create_sandbox_continues_when_template_is_not_ready(e2b_app):
     assert config.cpus == 2
     assert config.memory == "8g"
     assert config.disk == "50G"
+    assert config.extended_params.get("use_raw") == "true"
+    assert config.template_id is None
     log_info.assert_called_once_with(
-        "Template %s is not ready or does not exist; using request config",
+        "Template %s is not ready or does not exist; using raw manifest",
         "missing",
     )
 

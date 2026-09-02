@@ -1,6 +1,12 @@
 import pytest
 
-from rock.utils.format import convert_to_gb, megabytes_to_size, parse_size_to_bytes, parse_size_to_mb
+from rock.utils.format import (
+    convert_to_gb,
+    megabytes_to_size,
+    normalize_memory_to_k8s,
+    parse_size_to_bytes,
+    parse_size_to_mb,
+)
 
 
 def test_bytes_without_unit():
@@ -100,6 +106,24 @@ def test_parse_size_to_mb(size_str, expected):
 )
 def test_megabytes_to_size(megabytes, expected):
     assert megabytes_to_size(megabytes) == expected
+
+
+@pytest.mark.parametrize(
+    ("memory", "expected"),
+    [
+        ("8g", "8.00Gi"),
+        ("2048m", "2048.00Mi"),
+        ("1.5G", "1.50Gi"),
+        ("2k", "2.00Ki"),
+        ("1t", "1.00Ti"),
+        ("8Gi", "8Gi"),
+        ("1073741824", "1024.00Mi"),
+        ("abc", "abc"),
+        ("100x", "100x"),
+    ],
+)
+def test_normalize_memory_to_k8s(memory, expected):
+    assert normalize_memory_to_k8s(memory) == expected
 
 
 def test_convert_to_gb_from_bytes():

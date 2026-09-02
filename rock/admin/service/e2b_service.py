@@ -4,6 +4,7 @@ from rock.admin.proto.response import E2BSandboxInfo, SandboxStartResponse, Sand
 from rock.admin.service.e2b_sandbox_info import e2b_sandbox_info_fields
 from rock.deployments.config import DockerDeploymentConfig
 from rock.logger import init_logger
+from rock.sandbox.operator.remote.constants import EXT_USE_RAW, EXT_USE_RAW_ENABLED
 from rock.sandbox.sandbox_manager import SandboxManager
 from rock.sdk.common.exceptions import BadRequestRockError, E2BSandboxNotFoundError
 from rock.utils.format import megabytes_to_size
@@ -24,8 +25,13 @@ class E2BService:
     ) -> SandboxStartResponse:
         template = await self._template_table.get_ready_template(config.image)
         if template is None:
-            logger.info("Template %s is not ready or does not exist; using request config", config.image)
-            template_config = config
+            logger.info("Template %s is not ready or does not exist; using raw manifest", config.image)
+            template_config = config.model_copy(
+                update={
+                    "template_id": None,
+                    "extended_params": {**config.extended_params, EXT_USE_RAW: EXT_USE_RAW_ENABLED},
+                }
+            )
         else:
             template_config = config.model_copy(
                 update={

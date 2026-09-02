@@ -117,6 +117,16 @@ Template 方法默认 raise `NotImplementedError`，RemoteOperator 捕获后转�
 | `GET` | `/v1/templates/{id}` | 查询模板（200），404 表示不存在 |
 | `DELETE` | `/v1/templates/{id}` | 删除模板（202 / 204） |
 
+#### Raw 模式（K8s 对象透传）
+
+当 Control API 的字段（`resource_spec` 等）不足以表达需求时，`submit` 可走 raw 模式：把完整的 BatchSandbox CRD manifest 以 JSON 字符串形式放进 `raw` 字段透传给平台。
+
+- **触发条件**：E2B 链路中 template 表没有找到 READY 模板时，`E2BService` 置空 `template_id` 并在 `extended_params` 中设置 `use_raw=true`（此时请求的 image 被当作镜像名）；provider 内 `template_id` 优先于 `use_raw`，原生 SDK 链路（不携带该信号）维持 resource_spec 路径不变
+- **manifest 构造**：复用 K8s 链路的 `K8sTemplateLoader.build_manifest`（Jinja2 渲染 + drop-empty 规则），模板来自 `RemoteOperatorConfig.templates`（结构同 `K8sConfig.templates`，固定使用 `default`）；`memory` 经 `normalize_memory_to_k8s` 规范化后渲染
+- **请求体**：`{"raw": "<manifest JSON 字符串>"}`；Rock sandbox_id 由 `build_manifest` 写入 `metadata.name` 与 `rock.sandbox/sandbox-id` label（CRD 级 + Pod 级）
+- **port_mapping**：从模板的 `ports`（proxy/server/ssh）动态提取，不再写死；模板路径/resource_spec 路径仍使用固定映射（8000/8080/22）
+- **数据面**：raw manifest 的容器需自行启动 rocklet（如 command 中下载并启动），否则仅控制面可用
+
 #### 生命周期方法映射
 
 | Provider 方法 | SandboxManager API | 关键映射 |
@@ -189,6 +199,7 @@ Provider 在 `submit()` 返回的 `SandboxInfo` 中填充：
 | `access_token` | `str \| None` | `None` | Bearer token 认证（可选） |
 | `default_timeout` | `int` | `600` | HTTP 请求超时（秒） |
 | `provider_options` | `dict` | `{}` | provider 特有的额外配置，例如 `state_mapping` |
+| `templates` | `dict[str, dict]` | `{}` | raw 模式渲染模板，结构同 `K8sConfig.templates`（含 `ports` 与 Pod 模板） |
 
 `base_url` 为空时抛 `ValueError`。
 
@@ -207,6 +218,21 @@ remote:
   base_url: "http://sandbox-manager:8081"
   api_key: "your-x-api-key"
   default_timeout: 600
+  templates:                     # raw 模式渲染模板（结构同 K8sConfig.templates）
+    default:
+      ports: {proxy: 8000, server: 8080, ssh: 22}
+      template:
+        metadata:
+          labels: {app: rock-sandbox}
+        spec:
+          tolerations:
+            - operator: "Exists"
+          containers:
+            - name: sandbox
+              image: "{{ image }}"
+              command: ["/bin/sh", "-c", "pip install rl-rock[rocklet] && rocklet --port 8000"]
+              resources:
+                requests: {cpu: "{{ cpus }}", memory: "{{ memory }}"}
 ```
 
 ## 5. 工厂集成
@@ -252,6 +278,7 @@ tests/unit/sandbox/operator/remote/
 | stop 语义 | `stop` 与 `delete` 同语义 | Rock 不使用 pause/resume 语义，简化实现 |
 | 租约管理 | 不设 `timeout_seconds`，使用平台默认值；不实现 renew | Rock 自身的 `auto_archive_seconds` / `auto_delete_seconds` 控制生命周期 |
 | 认证 / 租户路由 | 客户端携带 `X-Api-Key`（必填）；`X-Sandbox-Class` 在 submit 时从 `DockerDeploymentConfig` 推导；profile 由网关从 API key 解析后内部下发，不进请求体也不由客户端携带 | 网关侧维护 API key → profile 映射；`X-Sandbox-Profile-ID` 为网关内部 header |
+| Raw 模式触发 | E2B 链路 DB 未命中模板时由 `E2BService` 在 `extended_params` 设置 `use_raw=true`（provider 特有信号不进一级字段），provider 内 `template_id` 优先；复用 `K8sTemplateLoader` 渲染 manifest 后以 `raw` 字符串透传 | 控制面字段不够时的高灵活性逃生舱；对齐 K8s 链路 `extended_params` 传 provider 行为的先例（`pool_name`/`template_name`）；CRD 与平台同源（sandbox.opensandbox.io/v1alpha1）无需转换 |
 
 ## 9. 与现有 Operator 对比
 
