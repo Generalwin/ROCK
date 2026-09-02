@@ -123,7 +123,7 @@ Template 方法默认 raise `NotImplementedError`，RemoteOperator 捕获后转�
 
 - **触发条件**：E2B 链路中 template 表没有找到 READY 模板时，`E2BService` 置空 `template_id` 并在 `extended_params` 中设置 `use_raw=true`（此时请求的 image 被当作镜像名）；provider 内 `template_id` 优先于 `use_raw`，原生 SDK 链路（不携带该信号）维持 resource_spec 路径不变
 - **manifest 构造**：复用 K8s 链路的 `K8sTemplateLoader.build_manifest`（Jinja2 渲染 + drop-empty 规则），模板来自 `RemoteOperatorConfig.templates`（结构同 `K8sConfig.templates`，固定使用 `default`）；`memory` 经 `normalize_memory_to_k8s` 规范化后渲染
-- **请求体**：`{"raw": "<manifest JSON 字符串>"}`；Rock sandbox_id 由 `build_manifest` 写入 `metadata.name` 与 `rock.sandbox/sandbox-id` label（CRD 级 + Pod 级）
+- **请求体**：`{"request_id": "<Rock sandbox_id>", "raw": "<manifest JSON 字符串>"}`；Rock sandbox_id 由 `build_manifest` 写入 `metadata.name` 与 `rock.sandbox/sandbox-id` label（CRD 级 + Pod 级）
 - **port_mapping**：从模板的 `ports`（proxy/server/ssh）动态提取，不再写死；模板路径/resource_spec 路径仍使用固定映射（8000/8080/22）
 - **数据面**：raw manifest 的容器需自行启动 rocklet（如 command 中下载并启动），否则仅控制面可用
 

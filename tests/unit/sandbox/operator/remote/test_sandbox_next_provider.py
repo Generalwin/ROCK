@@ -1,6 +1,7 @@
 """Unit tests for SandboxNextProvider — mock httpx transport."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import httpx
@@ -45,6 +46,16 @@ def _make_client(handler) -> httpx.AsyncClient:
         base_url="https://api.sandbox.test",
         transport=httpx.MockTransport(handler),
     )
+
+
+class _FakeAliveRuntime:
+    """RemoteSandboxRuntime stub for is_alive probes."""
+
+    def __init__(self, alive: bool):
+        self._alive = alive
+
+    async def is_alive(self):
+        return SimpleNamespace(is_alive=self._alive)
 
 
 _RAW_TEMPLATES = {
@@ -261,7 +272,8 @@ class TestSandboxNextProviderSubmitRaw:
         provider = SandboxNextProvider(config, client=_make_client(handler))
         info = await provider.submit(_make_docker_config(extended_params={EXT_USE_RAW: EXT_USE_RAW_ENABLED}), {})
 
-        assert set(seen["body"].keys()) == {"raw"}
+        assert set(seen["body"].keys()) == {"request_id", "raw"}
+        assert seen["body"]["request_id"] == "sb-test-001"
         assert isinstance(seen["body"]["raw"], str)
         manifest = json.loads(seen["body"]["raw"])
         assert manifest["apiVersion"] == "sandbox.opensandbox.io/v1alpha1"
@@ -327,6 +339,20 @@ class TestSandboxNextProviderSubmitRaw:
         assert "raw" not in seen["body"]
 
 
+class TestSandboxNextProviderBuildRuntime:
+    def test_default_proxy_port(self):
+        provider = SandboxNextProvider(_make_config(), client=_make_client(lambda r: httpx.Response(200)))
+        runtime = provider._build_runtime("10.0.0.5")
+        assert runtime._config.host == "http://10.0.0.5"
+        assert runtime._config.port == 8000
+
+    def test_proxy_port_from_raw_template(self):
+        templates = {"default": {"ports": {"proxy": 9000, "server": 8081, "ssh": 2222}, "template": {"spec": {"containers": [{"name": "sandbox", "image": "{{ image }}"}]}}}}
+        provider = SandboxNextProvider(_make_config(templates=templates), client=_make_client(lambda r: httpx.Response(200)))
+        runtime = provider._build_runtime("10.0.0.5")
+        assert runtime._config.port == 9000
+
+
 class TestSandboxNextProviderGetStatus:
     @pytest.mark.asyncio
     async def test_running(self):
@@ -338,10 +364,56 @@ class TestSandboxNextProviderGetStatus:
             })
 
         provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
+        provider._build_runtime = lambda host: _FakeAliveRuntime(True)
         info = await provider.get_status("sn-1")
         assert info is not None
         assert info["state"] == State.RUNNING
         assert info["host_ip"] == "10.0.0.5"
+
+    @pytest.mark.asyncio
+    async def test_running_demoted_to_pending_when_rocklet_not_alive(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "sandbox_id": "sn-1",
+                "state": "SANDBOX_RUNNING",
+                "endpoint": "10.0.0.5",
+            })
+
+        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
+        provider._build_runtime = lambda host: _FakeAliveRuntime(False)
+        info = await provider.get_status("sn-1")
+        assert info is not None
+        assert info["state"] == State.PENDING
+
+    @pytest.mark.asyncio
+    async def test_running_demoted_to_pending_when_is_alive_raises(self):
+        class _RaisingRuntime:
+            async def is_alive(self):
+                raise RuntimeError("probe failed")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "sandbox_id": "sn-1",
+                "state": "SANDBOX_RUNNING",
+                "endpoint": "10.0.0.5",
+            })
+
+        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
+        provider._build_runtime = lambda host: _RaisingRuntime()
+        info = await provider.get_status("sn-1")
+        assert info is not None
+        assert info["state"] == State.PENDING
+
+    @pytest.mark.asyncio
+    async def test_creating_not_probed(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"sandbox_id": "sn-1", "state": "SANDBOX_CREATING"})
+
+        provider = SandboxNextProvider(_make_config(), client=_make_client(handler))
+        provider._build_runtime = lambda host: pytest.fail("is_alive must not be probed before RUNNING")
+        info = await provider.get_status("sn-1")
+        assert info is not None
+        assert info["state"] == State.PENDING
 
     @pytest.mark.asyncio
     async def test_404_returns_none(self):

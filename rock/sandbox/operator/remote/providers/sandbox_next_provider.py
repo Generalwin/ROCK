@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 
+from rock.actions.sandbox.config import RemoteSandboxRuntimeConfig
 from rock.actions.sandbox.response import State
 from rock.actions.sandbox.sandbox_info import SandboxInfo
 from rock.config import RemoteOperatorConfig
@@ -22,6 +23,7 @@ from rock.deployments.constants import Port
 from rock.logger import init_logger
 from rock.sandbox.operator.k8s.template_loader import K8sTemplateLoader
 from rock.sandbox.operator.remote.constants import EXT_BACKEND, EXT_ENDPOINT, EXT_USE_RAW, EXT_USE_RAW_ENABLED, BACKEND_NAME
+from rock.sandbox.remote_sandbox import RemoteSandboxRuntime
 from rock.utils.format import normalize_memory_to_k8s, parse_size_to_mb
 
 logger = init_logger(__name__)
@@ -139,6 +141,7 @@ class SandboxNextProvider:
             port_mapping = dict(_DEFAULT_PORT_MAPPING)
 
         sandbox_class = _derive_sandbox_class(config)
+        logger.info("[%s] POST /v1/sandboxes body=%s", sandbox_id, body)
         response = await self._request(
             "POST",
             "/v1/sandboxes",
@@ -147,6 +150,7 @@ class SandboxNextProvider:
         )
         response.raise_for_status()
         data = response.json()
+        logger.info("[%s] response=%s", sandbox_id, data)
 
         sn_id = data["sandbox_id"]
         sn_state = data.get("state")
@@ -192,7 +196,7 @@ class SandboxNextProvider:
             Port.SERVER: ports["server"],
             Port.SSH: ports["ssh"],
         }
-        return {"raw": json.dumps(manifest)}, port_mapping
+        return {"request_id": config.container_name, "raw": json.dumps(manifest)}, port_mapping
 
     def _get_raw_template_loader(self) -> K8sTemplateLoader:
         """Lazily create the raw-mode manifest loader from RemoteOperatorConfig.templates."""
@@ -205,6 +209,7 @@ class SandboxNextProvider:
     async def get_status(self, remote_sandbox_id: str) -> SandboxInfo | None:
         response = await self._request("GET", f"/v1/sandboxes/{remote_sandbox_id}")
         if response.status_code == 404:
+            logger.info("[%s] sandbox_next get_status: not found", remote_sandbox_id)
             return None
         response.raise_for_status()
         data = response.json()
@@ -212,12 +217,35 @@ class SandboxNextProvider:
         sn_state = data.get("state")
         endpoint = data.get("endpoint") or ""
 
+        # Control-plane RUNNING does not imply rocklet is ready (raw mode downloads
+        # it at container start): demote to PENDING until is_alive succeeds.
+        state = _map_state(sn_state, self._state_map)
+        if state == State.RUNNING and endpoint:
+            runtime = self._build_runtime(endpoint)
+            try:
+                is_alive_response = await runtime.is_alive()
+                is_alive = is_alive_response.is_alive
+            except Exception as e:
+                is_alive = False
+            if not is_alive:
+                state = State.PENDING
+        logger.info("[%s] sandbox_next get_status, state=%s, endpoint=%s", remote_sandbox_id, sn_state, endpoint)
+
         # Only return fields that change at runtime; static fields are already in redis.
         info: SandboxInfo = {
-            "state": _map_state(sn_state, self._state_map),
+            "state": state,
             "host_ip": endpoint,
         }
         return info
+
+    def _build_runtime(self, host_ip: str) -> RemoteSandboxRuntime:
+        """Build runtime for is_alive probes; proxy port comes from the raw template or the default mapping."""
+        proxy_port = _DEFAULT_PORT_MAPPING[Port.PROXY]
+        if self._config.templates:
+            proxy_port = self._config.templates["default"]["ports"]["proxy"]
+        return RemoteSandboxRuntime.from_config(
+            RemoteSandboxRuntimeConfig(host=f"http://{host_ip}", port=proxy_port),
+        )
 
     async def stop(self, remote_sandbox_id: str) -> bool:
         """Stop the sandbox by deleting it (Rock does not use pause/resume)."""
